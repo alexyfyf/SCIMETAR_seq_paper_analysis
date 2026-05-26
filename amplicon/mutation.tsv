@@ -1,0 +1,7 @@
+name	sequence
+tet2a_wt	CAGAAAAGACACCAA
+tet2a_mut	CAGAAAACCAA
+tet2b_wt	AGGCTGCAGTGA
+tet2b_mut	AGGCTGAGTGA
+srsf2_wt	CCGCCCCCCGG
+srsf2_mut	CCGCCACCCGG
