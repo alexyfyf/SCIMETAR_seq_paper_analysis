@@ -11,10 +11,13 @@ For each read, we then genotype them as
 (1) TET2a WT or MUT only if the sequence was found in R1 alone, or in both R1 and R2rc. If it was only found in R2rc, it is discarded.
 (2) TET2b WT or MUT only if the sequence was found in R2rc alone, or in both R1 and R2rc.
 (3) SRSF2 WT or MUT if the sequence was found in R1 alone, both R1 and R2rc, or for in vivo data only if it was recovered during the less stringent Round 2 search. 
-gene	name	mut (hg19)	hg38 liftover
-SRSF2	SRSF2	SRSF2_chr17:74732959_G>T	chr17:76736877
-TET2	TET2a	TET2_chr4:106158367_AAGAC>A	chr4:105237210
-TET2	TET2b	TET2_chr4:106164802_GC>G	chr4:105243645
+
+| Gene | Name | Mutation (hg19) | hg38 liftover |
+| --- | --- | --- | --- |
+| SRSF2 | SRSF2 | SRSF2_chr17:74732959_G>T | chr17:76736877 |
+| TET2 | TET2a | TET2_chr4:106158367_AAGAC>A | chr4:105237210 |
+| TET2 | TET2b | TET2_chr4:106164802_GC>G | chr4:105243645 |
+
 To determine the genotype of each cell for a particular variant, cells with less than 20 or 10 genotyped reads, for in vitro and in vivo respectively, are labelled "unidentifiable". We then calculated the ratio of mutant reads / (mutant + wildtype reads), and if the ratio is > 0.99, the cell is labelled "mut/mut", if the ratio is < 0.05, the cell is labelled "wt/wt", and rest labelled "mut/wt".
 ## Single-cell RNA-seq Data Analysis
 The analysis was performed using R version 4.4.2. The gene expression count matrix was loaded into the Seurat R package (v5.1.0) and RPKM normalized [[5]](#ref-5). Cells were filtered to retain high-quality cells. Cells were included if they had more than 1000, 2000 or 1000 detected features (for MDSL cell line, in vitro and in vivo respectively) and were not marked as empty wells or dead cells based on matched FACS index sorting data. Raw counts were normalized and variance stabilized using the vst selection method in Seurat to identify the top 2,000 variable features. Data was scaled, and Principal Component Analysis (PCA) was performed on the variable features. The top 20 (10 for MDSL) principal components were used for downstream clustering and dimensionality reduction. A Shared Nearest Neighbor (SNN) graph was constructed with k=50 (30 for MDSL) neighbors, and clusters were identified using the Louvain algorithm with a resolution of 1.0 (0.8 for MDSL). Uniform Manifold Approximation and Projection (UMAP) was calculated on the same PCA dimensions to visualize the data in two dimensions. Cell cycle scoring was performed to assess the G2M and S phase scores for each cell.
@@ -44,4 +47,3 @@ Bhuyan, G. S., Yan, A., Nguyen, M. N. T., Zou, X., Gullapalli, V., Vaughan, L., 
 8. <a id="ref-8"></a>Yu, G., Wang, L. G., Han, Y. & He, Q. Y. ClusterProfiler: An R package for comparing biological themes among gene clusters. *OMICS A Journal of Integrative Biology* 16, 284–287 (2012).
 9. <a id="ref-9"></a>The Gene Ontology Consortium. Expansion of the Gene Ontology knowledgebase and resources. *Nucleic Acids Research* 45, D331–D338 (2017).
 10. <a id="ref-10"></a>Ritchie, M. E. et al. limma powers differential expression analyses for RNA-sequencing and microarray studies. *Nucleic acids research* 43, e47 (2015).
-
