@@ -1,0 +1,133 @@
+---
+title: "SCIMETAR LINE-1 qPCR batch correction"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+    number-sections: true
+    number-depth: 3
+execute:
+  warning: false
+  error: false
+  cache: true
+---
+
+## load precomputed csv and cell type annotation
+
+```{r, fig.width=15, fig.height=10, dev=c('png', 'pdf')}
+
+library(readxl)
+library(tidyverse)
+library(corrplot)
+library(DT)
+
+pcr2 <- read.csv('output/LINE1_qPCR_all.csv')
+
+```
+
+## batch correction with limma accounting for MspI wells
+Use limma batch correction, use all wells 
+
+### filtered by plate-wise cutoff N=1644
+```{r, fig.width=15, fig.height=10, dev=c('png', 'pdf')}
+library(limma)
+
+df <- pcr2 %>%
+  filter(keep_median, dCt > 0) %>%
+  mutate(
+    Plate   = factor(Plate),
+    group   = factor(group),
+    Is_MspI = as.logical(Is_MspI),
+    # merge all controls into ONE level so they’re preserved as a single mean
+    group_preserve = factor(if_else(Is_MspI, "MspI_control", as.character(group)))
+  )
+
+# Design: preserve (i) one shared control mean, (ii) each biology group mean
+design <- model.matrix(~ 0 + group_preserve, data = df)
+colnames(design) <- levels(df$group_preserve)
+
+# Matrix is features x samples (as limma expects)
+mat <- t(as.matrix(df %>% select(HEX_Ref, FAM_Tar)))
+batch <- df$Plate
+
+mat_bc <- removeBatchEffect(mat, batch = batch, design = design)
+
+df_bc <- df %>%
+  mutate(
+    HEX_Ref_bc = mat_bc["HEX_Ref", ],
+    FAM_Tar_bc = mat_bc["FAM_Tar", ],
+    dCt_adj = FAM_Tar_bc - HEX_Ref_bc
+  )
+
+# Before correction: control FAM-HEX by plate
+p1 <- df %>%
+  filter(Is_MspI) %>%
+  ggplot(aes(x = Plate, y = dCt)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.12, outlier.size = 0.4) +
+  labs(title = "Controls (Is_MspI): before batch correction", y = "FAM - HEX") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+
+# After correction: should align across plates much better
+p2 <- df_bc %>%
+  filter(Is_MspI) %>%
+  ggplot(aes(x = Plate, y = dCt_adj)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.12, outlier.size = 0.4) +
+  labs(title = "Controls (Is_MspI): after batch correction", y = "FAM - HEX (batch-corrected)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5))
+
+patchwork::wrap_plots(p1,p2)
+
+df_bc %>%
+  # filter(Is_MspI) %>%
+  ggplot(aes(x= factor(Plate), y = dCt_adj, fill = group)) +
+  geom_violin(trim = F) +
+  geom_boxplot(width = 0.1, position = position_dodge(width = 0.9)) + 
+  facet_grid(~Is_MspI) +
+  theme(legend.position = "bottom"
+  ) +
+  labs(y = "dCT value",
+       x = "group",
+       title = "MspI corrected dCT value by group (plate separated)")
+
+cat("Summary of delta Ct values in passed wells before and after MspI correction.\n")
+data.frame(before = df %>%
+             group_by(Plate, Is_MspI) %>% 
+             summarise(mean = mean(dCt, na.rm = T), median = median(dCt, na.rm = T)),
+           after = df_bc %>% 
+             group_by(Plate, Is_MspI) %>% 
+             summarise(mean = mean(dCt_adj, na.rm = T), median = median(dCt_adj, na.rm = T))) %>%
+  datatable() %>% formatRound(
+    columns = c(3,4,7,8),
+    digits  = 2
+  )
+
+data.frame(before = df %>%
+             group_by(group, Is_MspI) %>% 
+             summarise(mean = mean(dCt, na.rm = T), median = median(dCt, na.rm = T)),
+           after = df_bc %>% group_by(group, Is_MspI) %>% 
+             summarise(mean = mean(dCt_adj, na.rm = T), median = median(dCt_adj, na.rm = T))) %>%
+  datatable() %>% formatRound(
+    columns = c(3,4,7,8),
+    digits  = 2
+  )
+
+pcr.all <- pcr2 %>% 
+  left_join(df_bc %>% select(Plate_Well, HEX_Ref_bc, FAM_Tar_bc, dCt_adj), 
+            by = 'Plate_Well') %>%
+  rename(dCt_adj.limma_ctrl_p = dCt_adj)
+
+```
+
+
+```{r}
+write.csv(pcr.all,
+  "output/LINE1_qPCR_all_corrected.csv",
+  row.names = F)
+
+```
+
+

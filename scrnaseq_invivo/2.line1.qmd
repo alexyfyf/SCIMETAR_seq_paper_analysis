@@ -1,0 +1,360 @@
+---
+title: "SCIMETAR LINE-1 qPCR"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+    number-sections: true
+    number-depth: 3
+execute:
+  warning: false
+  error: false
+  cache: true
+---
+
+## Load LINE1 PCR results from csv 
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(ggridges)
+library(viridis)
+library(ggh4x)
+
+## load LINE1 and amplicon from GSB
+seuratobj <- readRDS('output/seurat_zumi_rpkm_unfilt2.rds')
+
+pcr <- seuratobj@meta.data %>%
+  mutate(across(c(HEX_Ref, FAM_Tar), ~ na_if(.x, "N/A"))) 
+
+pcr <- pcr %>%
+  mutate(col = str_remove(Well_ID, '^[A-Z]') %>% as.numeric(),
+         row = factor(as.character(str_remove(Well_ID, '[0-9][0-9]$')), levels = c("H","G","F","E","D","C","B","A")),
+         empty = Is_Empty,
+         HEX_Ref = as.numeric(HEX_Ref) %>% round(digits = 2),
+         FAM_Tar = as.numeric(FAM_Tar) %>% round(digits = 2)) %>%
+    mutate(dCt = FAM_Tar - HEX_Ref) %>%
+    unite(group, Cell_Type,Treatment, remove = F) 
+```
+
+
+## Distribution by plate location
+```{r, fig.width=15, fig.height=10, dev=c('png', 'pdf')}
+
+pcr %>% 
+  ggplot(aes(x = col, y = row, fill = HEX_Ref, col = empty)) + 
+  geom_tile(linewidth=1) +
+  facet_wrap(.~Plate, ncol = 7, nrow = 4) +
+  scale_colour_manual(values=c('TRUE'='red', 'FALSE'='black')) +
+  scale_fill_viridis() +
+  ggtitle('HEX_Ref faceted by well')
+
+pcr %>% 
+  group_by(col, row, empty) %>%
+  summarise(HEX_Ref = mean(HEX_Ref, na.rm = T)) %>%
+  ggplot(aes(x = col, y = row, fill = HEX_Ref, col = empty)) + 
+  geom_tile(linewidth=1) +
+  scale_colour_manual(values=c('TRUE'='red', 'FALSE'='black')) +
+  scale_fill_viridis() +
+  ggtitle('HEX_Ref all well average (NA remove)')
+
+pcr %>% 
+  ggplot(aes(x = col, y = row, fill = FAM_Tar, col = empty)) + 
+  geom_tile(linewidth=1) +
+  facet_wrap(.~Plate, ncol = 7, nrow = 4) +
+  scale_colour_manual(values=c('TRUE'='red', 'FALSE'='black')) +
+  scale_fill_viridis() +
+  ggtitle('FAM_Tar faceted by well')
+
+pcr %>% 
+  group_by(col, row, empty) %>%
+  summarise(FAM_Tar = mean(FAM_Tar, na.rm = T)) %>%
+  ggplot(aes(x = col, y = row, fill = FAM_Tar, col = empty)) + 
+  geom_tile(linewidth=1) +
+  scale_colour_manual(values=c('TRUE'='red', 'FALSE'='black')) +
+  scale_fill_viridis() +
+  ggtitle('FAM_Tar all well average (NA remove)')
+
+```
+
+## Adding cutoff based on HEX_ref
+### Calculated the cutoff plate wise
+```{r, fig.width=15, fig.height=10, dev=c('png', 'pdf')}
+
+cutoff_plate <- pcr %>%
+  group_by(Plate, group) %>%
+  summarise(HEX_Ref_group_mean = mean(HEX_Ref, na.rm = T),
+            HEX_Ref_group_median = median(HEX_Ref, na.rm = T),
+            HEX_Ref_group_sd = sd(HEX_Ref, na.rm = T),
+            HEX_Ref_group_mad = mad(HEX_Ref, na.rm = T),
+            HEX_Ref_group_5 = quantile(HEX_Ref, 0.01, na.rm = TRUE),
+            HEX_Ref_group_95 = quantile(HEX_Ref, 0.90, na.rm = TRUE)) %>%
+  mutate(HEX_Ref_group_lower = HEX_Ref_group_mean - 1*HEX_Ref_group_sd,
+         HEX_Ref_group_upper = HEX_Ref_group_mean + 1*HEX_Ref_group_sd, 
+         HEX_Ref_group_lower2 = HEX_Ref_group_median - 2*HEX_Ref_group_mad,
+         HEX_Ref_group_upper2 = HEX_Ref_group_median + 2*HEX_Ref_group_mad) 
+
+pcr2 <- pcr %>% 
+  left_join(cutoff_plate, by = c('group','Plate')) %>%
+  mutate(keep_qt = HEX_Ref < HEX_Ref_group_95 & HEX_Ref > HEX_Ref_group_5,
+         keep_mean = HEX_Ref > HEX_Ref_group_lower & HEX_Ref < HEX_Ref_group_upper,
+         keep_median = HEX_Ref > HEX_Ref_group_lower2 & HEX_Ref < HEX_Ref_group_upper2) 
+
+cat("Percentage of keeped wells using plate-wise 1% and 90% quantiles.\n")
+pcr2 %>%
+  count(group, keep_qt) %>%
+  group_by(group) %>%
+  summarise(pct = n/sum(n), 
+            keep = keep_qt)
+
+cat("Percentage of keeped wells using plate-wise mean and 1 sd.\n")
+pcr2 %>%
+  count(group, keep_mean) %>%
+  group_by(group) %>%
+  summarise(pct = n/sum(n), 
+            keep = keep_mean)
+
+cat("Percentage of keeped wells using plate-wise median and 2 mad.\n")
+pcr2 %>%
+  count(group, keep_median) %>%
+  group_by(group) %>%
+  summarise(pct = n/sum(n),
+            keep = keep_median)
+
+pcr2 %>% 
+  pivot_longer(cols = c(HEX_Ref, FAM_Tar),
+               names_to  = "Channel",
+               values_to = "Value") %>%
+  ggplot(aes(x= factor(Plate), y = Value, 
+             fill = Is_MspI)) +
+  geom_violin(trim = F) +
+  geom_boxplot(width = 0.1, position = position_dodge(width = 0.9)) + 
+  # add dashed 1th‐percentile lines
+  geom_hline(
+    aes(yintercept = HEX_Ref_group_5),
+    linetype   = "dashed",
+    color      = "black"
+  ) +
+  # add dashed 90th‐percentile lines
+  geom_hline(
+    aes(yintercept = HEX_Ref_group_95),
+    linetype   = "dashed",
+    color      = "black"
+  ) +
+  # add dashed upper lines
+  geom_hline(
+    aes(yintercept = HEX_Ref_group_upper),
+    linetype   = "dashed",
+    color      = "red"
+  ) +
+  # add dashed lower lines
+  geom_hline(
+    aes(yintercept = HEX_Ref_group_lower),
+    linetype   = "dashed",
+    color      = "red"
+  ) +
+    # add dashed upper lines
+  geom_hline(
+    aes(yintercept = HEX_Ref_group_upper2),
+    linetype   = "dashed",
+    color      = "blue"
+  ) +
+  # add dashed lower lines
+  geom_hline(
+    aes(yintercept = HEX_Ref_group_lower2),
+    linetype   = "dashed",
+    color      = "blue"
+  ) +
+  facet_grid(Channel~Plate, space = 'free_x', scales = "free_x") +
+  theme(legend.position = "bottom") +
+  labs(y = "PCR cycles",
+       x = "Plate",
+       title = "HEX vs FAM density by Plate")
+```
+
+
+### Position of rejected wells by plate and group
+```{r, fig.width=15, fig.height=10, dev=c('png', 'pdf')}
+pcr2 %>% 
+  ggplot(aes(x = col, y = row, fill = keep_median, col = empty)) + 
+  geom_tile(linewidth=1) +
+  facet_wrap(.~Plate, ncol = 7, nrow = 4) +
+  scale_colour_manual(values=c('TRUE'='red', 'FALSE'='black')) +
+  #scale_fill_viridis() +
+  ggtitle('Outliers faceted by well cutoff based on plate median')
+
+```
+
+## dCt value
+### dCt value in all wells
+dCT = FAM_Tar - HEX_Ref
+```{r, fig.width=15, fig.height=10, dev=c('png', 'pdf')}
+cat("Summary of delta Ct (dCt) values in all wells.\n")
+summary(pcr2$dCt)
+
+pcr2 %>%
+  ggplot(aes(x= dCt, y = group, fill = factor(stat(quantile)), #fill = Channel,
+           group = group)) +
+  stat_density_ridges(
+    geom = "density_ridges_gradient",
+    calc_ecdf = TRUE,
+    quantiles = c(0.025, 0.975)
+  ) +
+  scale_fill_manual(
+    name = "Probability", values = c("#FF0000A0", "#A0A0A0A0", "#0000FFA0"),
+    labels = c("(0, 0.025]", "(0.025, 0.975]", "(0.975, 1]")
+  ) + 
+  # geom_density_ridges(position = position_identity(), 
+  #                     scale = 1, alpha = 0.7) +
+  # facet_wrap(Cell_Type ~ Treatment, scales = "free_y") + 
+  theme_ridges(center_axis_labels = TRUE) +
+  theme(legend.position = "bottom"
+        ) +
+  labs(x = "dCT value",
+       y = "group",
+       title = "dCT value by group (plate combined)")
+
+pcr2 %>% 
+  ggplot(aes(x= group, y = dCt, fill = group)) +
+  geom_violin(trim = F) +
+  geom_boxplot(width = 0.1, position = position_dodge(width = 0.9)) + 
+  theme(legend.position = "bottom"
+        ) +
+  labs(y = "dCT value",
+       x = "group",
+       title = "dCT value by group (plate combined)")
+
+pcr2 %>% 
+  ggplot(aes(x= group, y = dCt, fill = Is_MspI)) +
+  geom_violin(trim = F) +
+  geom_boxplot(width = 0.1, position = position_dodge(width = 0.9)) +
+  facet_wrap(~ Is_MspI) +
+  theme(legend.position = "bottom"
+        ) +
+  labs(y = "dCT value",
+       x = "group",
+       title = "dCT value by group (plate combined)", 
+       subtitle = "Stratified by is_Msp1")
+
+pcr2 %>%
+  ggplot(aes(x= dCt, y = group, fill = factor(stat(quantile)), #fill = Channel,
+           group = Plate)) +
+  stat_density_ridges(
+    geom = "density_ridges_gradient",
+    calc_ecdf = TRUE,
+    quantiles = c(0.025, 0.975)
+  ) +
+  scale_fill_manual(
+    name = "Probability", values = c("#FF0000A0", "#A0A0A0A0", "#0000FFA0"),
+    labels = c("(0, 0.025]", "(0.025, 0.975]", "(0.975, 1]")
+  ) + 
+  # geom_density_ridges(position = position_identity(), 
+  #                     scale = 1, alpha = 0.7) +
+  # facet_wrap(Cell_Type ~ Treatment, scales = "free_y") + 
+  theme_ridges(center_axis_labels = TRUE) +
+  theme(legend.position = "bottom"
+        ) +
+  labs(x = "dCT value",
+       y = "group",
+       title = "dCT value by group (plate separated)")
+
+pcr2 %>% 
+  ggplot(aes(x= factor(Plate), y = dCt, fill = group)) +
+  geom_violin(trim = F) +
+  geom_boxplot(width = 0.1, position = position_dodge(width = 0.9)) + 
+  theme(legend.position = "bottom"
+        ) +
+  labs(y = "dCT value",
+       x = "group",
+       title = "dCT value by group (plate separated)")
+
+pcr2 %>% 
+  ggplot(aes(x= factor(Plate), y = dCt, fill = Is_MspI)) +
+  geom_violin(trim = F) +
+  geom_boxplot(width = 0.1, position = position_dodge(width = 0.9)) + 
+  facet_wrap(~ Is_MspI) +
+  theme(legend.position = "bottom"
+        ) +
+  labs(y = "dCT value",
+       x = "group",
+       title = "dCT value by group (plate separated)",
+       subtitle = "Stratified by is_Msp1")
+
+```
+
+### dCt value in passed wells (plate based)
+dCT = FAM_Tar - HEX_Ref
+```{r, fig.width=15, fig.height=10, dev=c('png', 'pdf')}
+
+cat("Summary of delta Ct (dCt) values in plate passed wells.\n")
+summary(pcr2 %>% filter(keep_median) %>% pull(dCt))
+
+pcr2 %>% 
+  filter(keep_median) %>%
+  ggplot(aes(x= group, y = dCt, fill = group)) +
+  geom_violin(trim = F) +
+  geom_boxplot(width = 0.1, position = position_dodge(width = 0.9)) + 
+  theme(legend.position = "bottom"
+        ) +
+  labs(y = "dCT value",
+       x = "group",
+       title = "dCT value by group (plate combined)")
+
+pcr2 %>% 
+  filter(keep_median) %>%
+  ggplot(aes(x= group, y = dCt, fill = Is_MspI)) +
+  geom_violin(trim = F) +
+  geom_boxplot(width = 0.1, position = position_dodge(width = 0.9)) +
+  facet_wrap(~ Is_MspI) +
+  theme(legend.position = "bottom"
+        ) +
+  labs(y = "dCT value",
+       x = "group",
+       title = "dCT value by group (plate combined)", 
+       subtitle = "Stratified by is_Msp1")
+
+pcr2 %>% 
+  filter(keep_median) %>%
+  ggplot(aes(x= factor(Plate), y = dCt, fill = group)) +
+  geom_violin(trim = F) +
+  geom_boxplot(width = 0.1, position = position_dodge(width = 0.9)) + 
+  theme(legend.position = "bottom"
+        ) +
+  labs(y = "dCT value",
+       x = "group",
+       title = "dCT value by group (plate separated)")
+
+pcr2 %>% 
+  filter(keep_median) %>%
+  ggplot(aes(x= factor(Plate), y = dCt, fill = Is_MspI)) +
+  geom_violin(trim = F) +
+  geom_boxplot(width = 0.1, position = position_dodge(width = 0.9)) + 
+  facet_wrap(~ Is_MspI) +
+  theme(legend.position = "bottom"
+        ) +
+  labs(y = "dCT value",
+       x = "group",
+       title = "dCT value by group (plate separated)",
+       subtitle = "Stratified by is_Msp1")
+```
+
+### dCt values by plate position
+```{r, fig.width=15, fig.height=10, dev=c('png', 'pdf')}
+pcr2 %>% 
+  mutate(dCt_cut = cut(dCt, breaks = c(-Inf, 0, 20, Inf))) %>%
+  ggplot(aes(x = col, y = row, fill = dCt_cut, col = keep_median)) + 
+  geom_tile(linewidth=1) +
+  facet_wrap(.~Plate, ncol = 7, nrow = 4) +
+  scale_colour_manual(values=c('FALSE'='red', 'TRUE'='black')) +
+  scale_fill_viridis_d(direction = -1) +
+  ggtitle('Outliers faceted by well plate based')
+
+```
+
+```{r}
+write.csv(pcr2 %>%
+  select(-(HEX_Ref_group_mean:HEX_Ref_group_upper2)), 
+  "output/LINE1_qPCR_all.csv", row.names = F)
+```

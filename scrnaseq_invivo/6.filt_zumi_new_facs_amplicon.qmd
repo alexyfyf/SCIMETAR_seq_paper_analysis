@@ -1,0 +1,755 @@
+---
+title: "SCIMETAR single cell analysis (Flitered by RPKM) add LINE1, FACS and amplicon data"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+    number-sections: true
+    number-depth: 3
+execute: 
+  cache: true
+  warning: false
+  error: false
+---
+
+## Load filtered and annotated seurat object 
+
+```{r, dev=c('png', 'pdf')}
+library(matrixStats)
+library(ggfortify)
+library(Seurat)
+library(edgeR)
+library(tidyverse)
+library(DT)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggpubr)
+library(EnhancedVolcano)
+library(ggh4x)
+library(viridis)
+library(patchwork)
+library(readxl)
+library(RColorBrewer)
+library(UpSetR)
+library(data.table)
+library(ggsankey)
+library(ggalluvial)
+library(ggrepel)
+library(scales)
+library(ggsci)
+```
+
+
+```{r}
+
+filtered2 <- readRDS("output/filtered2.rds")
+
+na_grey   <- "grey85"            # any NA in celltype_merge
+
+# use the Dev Cell colors extracted, same order as the weblink
+col_ref <- c(
+  HSC   = "#ED6D52",
+  MPP1  = "#F5C3CB",
+  MPP2  = "#DF87E8",
+  LMPP  = "#5DCBCF",
+  MLP   = "#4A895B",
+  MEP   = "#8E71D5",
+  Neu1  = "#F2A93B",
+  B_NK1 = "#75FB8C",
+  Neu2  = "#C3884D",
+  MD    = "#EFE697",
+  EBM   = "#FADFB3",
+  Mk    = "#4A68DA",
+  Ery   = "#97CCE7",
+  B_NK2 = "#A6EB99"
+)
+
+col_celltype <- c(
+  DEV_HSC   = "#ED6D52", FACS_HSC = "#ED6D52", 
+  DEV_MPP1  = "#F5C3CB", #FACS_MHSC = "#DF87E8", 
+  FACS_MPP = "#F5C3CB",
+  DEV_MPP2  = "#DF87E8",
+  DEV_MEP   = "#8E71D5", FACS_MEP = "#8E71D5",
+  DEV_Ery   = "#97CCE7",
+  DEV_Mk    = "#4A68DA",
+  DEV_LMPP  = "#5DCBCF", FACS_LMPP = "#5DCBCF", FACS_CMP = "#F2A93B", 
+  DEV_MLP   = "#4A895B", FACS_CLP = "#4A895B",
+  DEV_B_NK1 = "#75FB8C",
+  DEV_B_NK2 = "#A6EB99",
+  DEV_Neu1  = "#F2A93B", FACS_GMP = "#C3884D", 
+  DEV_Neu2  = "#C3884D",
+  DEV_MD    = "#EFE697",
+  DEV_EBM   = "#FADFB3"
+)
+
+col_celltype <- col_celltype[c(
+  "FACS_HSC",'DEV_HSC',
+  "FACS_MHSC","FACS_MPP","DEV_MPP1","DEV_MPP2",
+  "FACS_CMP","FACS_LMPP",'DEV_LMPP',
+  "FACS_GMP", "DEV_Neu1","FACS_MEP",'DEV_MEP',"FACS_CLP","DEV_MLP",
+  "DEV_Neu2","DEV_B_NK1",
+  "DEV_MD","DEV_EBM","DEV_Ery","DEV_Mk")]
+
+# col_facs <- setNames(pal_npg("nrc")(10)[1:9], filtered2@meta.data$celltype_merge %>% factor %>% levels)
+# col_facs["other"] <- "grey50"        # explicit grey for “other”
+col_facs <- c(
+  HSC = "#ED6D52",
+  #MHSC = "#DF87E8", 
+  MPP = "#F5C3CB",
+  LMPP = "#5DCBCF",
+  CMP = "#F2A93B", 
+  CLP = "#4A895B",
+  MEP = "#8E71D5",
+  GMP = "#C3884D",
+  other = "grey50"
+)
+
+# col_group <- setNames(brewer.pal(12, "Paired")[c(3:6)], filtered2@meta.data$group %>% factor %>% levels)
+col_group <- c("C4D1_C4D1" = "#80cdc1", 
+               "C4D8_C4D8" = "#018571"
+               # "C4D8_C4D8" = "#dfc27d",
+               # 'Primary_Patient_AZA' = "#a6611a"
+               )
+
+col_cluster <- setNames(brewer.pal(12, "Set3")[c(1,3:8,10,11)], 0:8)
+
+col_treatment <- setNames(brewer.pal(2, "Set2")[1:2], c('C4D1','C4D8'))
+
+col_source <- setNames(c("#018571" , "#a6611a"), c('GR', 'Primary_Patient'))
+
+col_phase <- c(G1='#663399', G2M='#E66100', S='#2A934E')
+
+col_genotype <- c(
+  "unidentifiable" = '#d9d9d9',
+  "wt/wt" = '#253494',
+  "mut/wt" = '#dd1c77',
+  # "mut/mut" = '#980043',
+  "mut/mut" = '#dd1c77'
+)
+
+# 2 group genotype
+filtered2 <- AddMetaData(filtered2, 
+                         metadata = data.frame(genotype_srsf2_2 = str_replace(filtered2$genotype_srsf2, 'mut/mut','mut/wt'),
+                                               genotype_tet2a_2 = str_replace(filtered2$genotype_tet2a, 'mut/mut','mut/wt'),
+                                               genotype_tet2b_2 = str_replace(filtered2$genotype_tet2b, 'mut/mut','mut/wt'),
+                                               dCt_adj = ifelse(filtered2$Is_MspI, NA, filtered2$dCt_adj.limma_ctrl_p)))
+
+```
+
+## Amplicon analysis
+### UMAP plot by amplicon genotyping
+```{r, dev=c('png', 'pdf'), fig.height=5, fig.width=10}
+
+DimPlot(filtered2, reduction = "umap",
+        group.by = 'genotype_srsf2_2',
+        split.by = 'group', cols = col_genotype) +
+  plot_layout(ncol = 1, nrow = 1,
+              widths = unit(3*2, "in"),
+              heights = unit(3, "in") )
+
+DimPlot(filtered2, reduction = "umap",
+        group.by = 'genotype_tet2a_2',
+        split.by = 'group', cols = col_genotype) +
+  plot_layout(ncol = 1, nrow = 1,
+              widths = unit(3*2, "in"),
+              heights = unit(3, "in") )
+
+DimPlot(filtered2, reduction = "umap", 
+        group.by = 'genotype_tet2b_2', 
+        split.by = 'group', cols = col_genotype) +
+  plot_layout(ncol = 1, nrow = 1,     
+              widths = unit(3*2, "in"),   
+              heights = unit(3, "in") )
+
+```
+
+### Average SRSF2 mut ratio 
+```{r, dev=c('png', 'pdf'), fig.width=15, fig.height=30}
+
+geno_levels  <- c("wt/wt", "mut/wt", "mut/mut", "unidentifiable")
+treat_levels <- c("C4D1", "C4D8") 
+
+ord <- c(0,1,2,3,4) # reorder seurat cluster 
+
+source('../script/plot_genotype_bar.R')
+
+p <- plot_genotype_bar(filtered2@meta.data, 'srsf2')
+
+patchwork::wrap_plots(p, ncol = 1)
+```
+
+
+### Average TET2A mut ratio 
+
+```{r, dev=c('png', 'pdf'), fig.width=15, fig.height=30}
+p <- plot_genotype_bar(filtered2@meta.data, 'tet2a')
+patchwork::wrap_plots(p, ncol = 1)
+```
+
+### Average TET2B mut ratio 
+
+```{r, dev=c('png', 'pdf'), fig.width=15, fig.height=30}
+p <- plot_genotype_bar(filtered2@meta.data, 'tet2b')
+patchwork::wrap_plots(p, ncol = 1)
+```
+
+
+### Concordance of FACS and Azimuth clustering
+
+We can now manually assigne most seurat clusters.  
+
+```
+1/3: C4D1
+0/2: C4D8
+4: Mixed likely lymphoid
+```
+```
+0: MPP1/2
+1: HSC/MPP1/2
+2: MEP/Ery
+3: MPP1
+4: LMPP/MPP1
+```
+
+```{r, dev=c('png', 'pdf'), fig.width=15, fig.height=20}
+
+print(ord)
+
+filtered2@meta.data <- filtered2@meta.data %>%
+  mutate(seurat_clusters = factor(seurat_clusters, levels = ord))
+
+sankey_df <- data.frame(
+  # singleR.Blueprint = filtered2$SingleR.Blueprint.fine,
+  # singleR.Novershtern = filtered2$SingleR.Novershtern.main,
+  cluster = factor(filtered2$seurat_clusters, levels = ord),
+  devcell = factor(filtered2$predicted.RNA_clusters, levels = names(col_ref)), ## change to Azimuth annotation
+  FACS = factor(filtered2$celltype_merge, levels = names(col_facs)),
+  rowname = colnames(filtered2), 
+  source = filtered2$Cell_Type, 
+  treatment = filtered2$Treatment,
+  group = factor(filtered2$group, levels = names(col_group)),
+  dCt_adj = filtered2$dCt_adj,
+  genotype_srsf2 = filtered2$genotype_srsf2_2,
+  genotype_tet2a = filtered2$genotype_tet2a_2,
+  genotype_tet2b = filtered2$genotype_tet2b_2,
+  Is_MspI = filtered2$Is_MspI
+  )
+
+# all-in-one comparison
+
+sankey_df %>%
+  # filter(source != 'MDSL') %>%
+  group_by(source, treatment) %>%
+  group_modify(~make_long(.x, group, cluster, devcell)) %>%
+  mutate(node = factor(node, 
+                       levels = c(rev(ord), 
+                                  rev(names(col_ref)),
+                                  names(col_group))) 
+  ) %>%
+  ggplot(aes(x = x, 
+             next_x = next_x, 
+             node = node, 
+             next_node = next_node,
+             fill = node,
+             label = node)) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30") +
+  geom_sankey_label(size = 3, color = "white", fill = "gray40") +
+  # scale_fill_viridis_d(drop = FALSE) +
+  scale_fill_manual(values = c(col_cluster, 
+                               col_ref,
+                               col_group))   
+
+## compare dev cell vs transcriptome based clusters
+sankey_df %>%
+  filter(source != 'MDSL') %>%
+  group_by(source, treatment) %>%
+  group_modify(~make_long(.x, cluster, devcell)) %>%
+  mutate(node = factor(node, 
+                       levels = c(rev(ord), 
+                                  rev(names(col_ref)))) 
+  ) %>% 
+  ggplot(aes(x = x, 
+             next_x = next_x, 
+             node = node, 
+             next_node = next_node,
+             fill = node,
+             label = node)) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30") +
+  geom_sankey_label(size = 3, color = "white", fill = "gray40") +
+  # scale_fill_viridis_d(drop = FALSE) +
+  scale_fill_manual(values = c(col_cluster, 
+                               col_ref
+  ))   
+
+## compare dev cell vs facs clusters
+sankey_df %>%
+  filter(source != 'MDSL') %>%
+  group_by(source, treatment) %>%
+  group_modify(~make_long(.x, FACS, devcell)) %>%
+  mutate(node = factor(node, 
+                       levels = c(
+                         rev(names(col_ref)),
+                         rev(names(col_facs))) %>% rev() %>% unique() %>% rev() ) 
+  ) %>% 
+  ggplot(aes(x = x, 
+             next_x = next_x, 
+             node = node, 
+             next_node = next_node,
+             fill = node,
+             label = node)) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30") +
+  geom_sankey_label(size = 3, color = "white", fill = "gray40") +
+  # scale_fill_viridis_d(drop = FALSE) +
+  scale_fill_manual(values = c(col_facs, 
+                               col_ref
+  ))  
+
+## compare facs clusters to seurat clusters
+sankey_df %>%
+  filter(source != 'MDSL') %>%
+  group_by(source, treatment) %>%
+  group_modify(~make_long(.x, FACS, cluster)) %>%
+  mutate(node = factor(node, 
+                       levels = c(
+                         rev(names(col_cluster)),
+                         rev(names(col_facs))) %>% unique() ) 
+  ) %>% 
+  ggplot(aes(x = x, 
+             next_x = next_x, 
+             node = node, 
+             next_node = next_node,
+             fill = node,
+             label = node)) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30") +
+  geom_sankey_label(size = 3, color = "white", fill = "gray40") +
+  # scale_fill_viridis_d(drop = FALSE) +
+  scale_fill_manual(values = c(col_facs, 
+                               col_cluster
+  ))  
+
+```
+
+### Sankey plot for each group (cell_type + treatment)
+```{r, dev=c('png', 'pdf'), fig.height=10, fig.width=20}
+
+for (i in unique(sankey_df$group)[1:2]) {
+  
+  combined_levels <- c(names(col_celltype),
+                       ord)
+  
+  ## alluvial plot
+  
+  plot_df <- sankey_df %>%
+    filter(group == i & FACS != "other" & !is.na(FACS)) %>%
+    mutate(
+      FACS    = paste0("FACS_", as.character(FACS)),
+      # cluster = paste0("CL_", as.character(cluster)),
+      devcell = paste0("DEV_", as.character(devcell))
+    ) %>%
+    dplyr::select(rowname, FACS, cluster, devcell, dCt_adj) %>%
+        mutate(devcell = factor(devcell, levels = combined_levels),
+           cluster = factor(cluster, levels = combined_levels),
+           FACS = factor(FACS, levels = combined_levels)) 
+  
+  y_max <- nrow(plot_df)
+  
+  p_alluvial <- plot_df %>%
+    # dplyr::select(2:4) %>%
+    dplyr::count(FACS, cluster, devcell) %>%
+    to_lodes_form(axes=1:3, id="id") %>%
+    ggplot(aes(x=x, y=n, stratum=stratum, alluvium=id,
+               fill=stratum, label=stratum)) +
+    geom_flow(stat = "alluvium" #, color="darkgray"
+    )+
+    geom_stratum(alpha=0.8) +
+    geom_text(
+      aes(label = ifelse(x == 'cluster', as.character(stratum), NA)),
+      stat = "stratum") +
+    ggrepel::geom_text_repel(
+      aes(label = ifelse(x == 'FACS', as.character(stratum), NA)),
+      stat = "stratum", size = 3, direction = "y", nudge_x = -.8
+    ) +
+    ggrepel::geom_text_repel(
+      aes(label = ifelse(x == 'devcell', as.character(stratum), NA)),
+      stat = "stratum", size = 3, direction = "y", nudge_x = .8
+    ) +
+    theme(legend.position = "left") + 
+    scale_fill_manual(values = c(col_celltype, col_cluster)) +
+    scale_y_continuous(limits = c(0, y_max), expand = expansion(mult = c(0, 0))) +
+    coord_cartesian(clip = "off") +
+    ggtitle(paste(i, '\nImmunophenotye vs Seurat cluster vs Dev Cell annotation Alluvial plot'))
+  
+  p_waterfall <- plot_df %>%
+  arrange(devcell, cluster, FACS, desc(dCt_adj)) %>%                 # keep your ordering
+  mutate(rowname = fct_rev(factor(rowname, levels = rowname))) %>%      # freeze order
+  ggplot(aes(y = rowname)) +
+  # bar length encodes value; start at lower limit so lengths are comparable
+  geom_segment(
+    aes(x = 9.5, xend = dCt_adj, yend = rowname, colour = dCt_adj),
+    linewidth = 2, lineend = "round", na.rm = TRUE
+  ) +
+  geom_point(aes(x = dCt_adj, colour = dCt_adj), size = 1.4, na.rm = TRUE) +
+  # scale_x_continuous(limits = c(10.5, 16), expand = expansion(mult = c(0, 0.02))) +
+  scale_y_discrete(expand = expansion(add = c(0, 0))) +
+  coord_cartesian(xlim = c(3,12), clip = "off") + # show full range
+  scale_colour_viridis_c(
+    direction = -1, limits = c(3,12),
+    oob = squish, na.value = "grey90"
+  ) +
+  labs(x = "dCt_adj", y = NULL, colour = "dCt_adj") +
+  theme_minimal() +
+  theme(
+    axis.text.y  = element_blank(),
+    axis.ticks.y = element_blank()
+  ) +
+  ggtitle(paste(i, "\ndCt Waterfall"))
+  
+  combined_plot <- p_alluvial + p_waterfall +
+    plot_layout(ncol = 2,
+                 widths = c(3, 0.5))
+  
+  # use explicitly print to render in Quarto
+  print(combined_plot)
+  
+}
+
+```
+
+
+### Sankey plot by SRSF2 genotypes
+
+```{r,  dev=c('png', 'pdf'), fig.height=10, fig.width=20}
+
+plot_df <- sankey_df %>%
+  filter(FACS != "other" & !is.na(FACS)) %>%
+  dplyr::select(group, rowname, FACS, cluster, devcell, dCt_adj, 
+                genotype_srsf2, genotype_tet2a, genotype_tet2b) %>%
+  mutate(#devcell = factor(devcell, levels = combined_levels),
+         cluster = factor(cluster, levels = ord),
+         FACS = factor(FACS, levels = names(col_facs))) 
+
+plot_genotype_alluvial <- function(df, title_suffix = "") {
+  # stopifnot(is_alluvial(df, axes = 1:2, silent = TRUE) || TRUE) # harmless
+  
+  df %>%
+    count(FACS, cluster, name = "n") %>%                 # one genotype subset already
+    to_lodes_form(axes = 1:2, id = "id") %>%
+    ggplot(aes(x = x, y = n, stratum = stratum, alluvium = id,
+               fill = stratum, label = stratum)) +
+    geom_flow(stat = "alluvium") +
+    geom_stratum(alpha = 0.8) +
+    ggrepel::geom_text_repel(
+      aes(label = ifelse(x == "FACS", as.character(stratum), NA)),
+      stat = "stratum", size = 3, direction = "y", nudge_x = -0.8
+    ) +
+    ggrepel::geom_text_repel(
+      aes(label = ifelse(x == "cluster", as.character(stratum), NA)),
+      stat = "stratum", size = 3, direction = "y", nudge_x =  0.8
+    ) +
+    scale_fill_manual(values = c(col_facs, col_cluster)) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+    ggtitle(title_suffix) +
+    theme(legend.position = "right", 
+          axis.title.x = element_blank() )
+}
+
+# for C4D1
+plots <- plot_df %>%
+  filter(genotype_srsf2 != "unidentifiable",
+         group == 'C4D1_C4D1' ) %>%
+  group_split(genotype_srsf2) %>%
+  lapply(function(dd) {
+    gname <- unique(dd$genotype_srsf2)
+    plot_genotype_alluvial(dd, gname)
+  })
+
+# Show as a row (or use wrap_plots(plots, ncol = 2))
+p_alluvial <- patchwork::wrap_plots(plots, ncol = length(plots)) +
+  plot_layout(guides = "collect") +
+  plot_annotation(
+    title = "C4D1 Immunophenotype vs Seurat cluster (by SRSF2 genotype)") &                # collect a single legend
+  theme(legend.position = "right")   
+p_alluvial
+
+
+## for C4D8
+plots <- plot_df %>%
+  filter(genotype_srsf2 != "unidentifiable",
+         group == 'C4D8_C4D8' ) %>%
+  group_split(genotype_srsf2) %>%
+  lapply(function(dd) {
+    gname <- unique(dd$genotype_srsf2)
+    plot_genotype_alluvial(dd, gname)
+  })
+
+# Show as a row (or use wrap_plots(plots, ncol = 2))
+p_alluvial <- patchwork::wrap_plots(plots, ncol = length(plots)) +
+  plot_layout(guides = "collect") +
+  plot_annotation(
+    title = "C4D8 Immunophenotype vs Seurat cluster (by SRSF2 genotype)") &                # collect a single legend
+  theme(legend.position = "right")   
+p_alluvial
+
+
+```
+
+## LINE1 qPCR results plot by treatment and cell types
+
+```{r, dev=c('png', 'pdf'), fig.width=15, fig.height=10}
+lims <- c(3,12)
+
+## 1454 LINE1 pass cells
+filtered2_pass <- subset(filtered2, subset = keep_median & dCt > 0)
+
+patchwork::wrap_plots( FeaturePlot( filtered2_pass,
+                                    features=c("dCt_adj"),
+                                    combine=FALSE)) +
+  plot_layout(ncol = 1, nrow = 1,
+              widths = unit(c(3,3), "in"),
+              heights = unit(3, "in") ) &
+  theme(legend.position = "right") &
+  scale_color_viridis_c(direction = -1,
+                        limits = lims,
+    oob = squish, # squish values outside limits
+    na.value = "grey90") &
+  ggtitle('UMAP of LINE1 and RNAseq passed cells')
+
+patchwork::wrap_plots( FeaturePlot( filtered2_pass,
+                                    features=c("dCt_adj"),
+                                    split.by = 'group',
+                                    combine=FALSE)) +
+  plot_layout(ncol = 3, nrow = 2,
+              widths = unit(c(3,3), "in"),
+              heights = unit(3, "in") ) &
+  theme(legend.position = "right") &
+    scale_color_viridis_c(direction = -1,
+                        limits = lims,
+    oob = squish, # squish values outside limits
+    na.value = "grey90")
+
+
+VlnPlot(filtered2_pass,
+        features = 'dCt_adj',
+        group.by = 'Cell_Type', split.by = 'Treatment',
+        cols = col_treatment,
+        split.plot = T) +
+  scale_y_continuous(limits = lims)
+
+VlnPlot(filtered2_pass,
+        features = 'dCt_adj',
+        group.by = 'celltype_merge',
+        cols = col_facs) +
+  scale_y_continuous(limits = lims)
+
+VlnPlot(filtered2_pass,
+        features = 'dCt_adj',
+        group.by = 'predicted.RNA_clusters',
+        cols = col_ref) +
+  scale_y_continuous(limits = lims)
+
+VlnPlot(filtered2_pass,
+        features = 'dCt_adj',
+        group.by = 'seurat_clusters',
+        cols = col_cluster) +
+  scale_y_continuous(limits = lims)
+
+```
+
+
+### LINE1 by FACS subtype
+```{r, dev=c('png', 'pdf')}
+# All data (LINE1 and RNAseq passed)
+
+source('../script/vlnplot_padj.R')
+
+df <- FetchData(filtered2_pass,
+                vars = c('dCt_adj','celltype_merge','Treatment'))
+
+df_filtered <- df %>%
+  filter(!is.na(celltype_merge) & celltype_merge != 'other') %>%
+  filter(!is.na(dCt_adj)) %>%           # <--- CRITICAL STEP: Remove MspI well with NA value now
+  group_by(celltype_merge, Treatment) %>%
+  filter(n() >= 2) %>%
+  ungroup()
+
+compare_means(
+  formula         = dCt_adj ~ Treatment,
+  group.by        = "celltype_merge",
+  data            = df_filtered,
+  method          = 't.test',
+  p.adjust.method = "fdr"
+)
+
+vlnplot_padj(filtered2_pass,
+             c('dCt_adj','celltype_merge','Treatment','genotype_srsf2_2'),
+             facetorder = names(col_facs),
+             fill = col_group,
+             lims = lims)
+vlnplot_padj(filtered2_pass,
+             c('dCt_adj','celltype_merge','Treatment','genotype_tet2a_2'),
+             facetorder = names(col_facs),
+             fill = col_group, 
+             lims = lims)
+vlnplot_padj(filtered2_pass,
+             c('dCt_adj','celltype_merge','Treatment','genotype_tet2b_2'),
+             facetorder = names(col_facs),
+             fill = col_group,
+             lims = lims)
+
+```
+
+### LINE1 by Seurat cluster
+
+```{r, dev=c('png', 'pdf')}
+# All data (LINE1 and RNAseq passed)
+
+df <- FetchData(filtered2_pass,
+                vars = c('dCt_adj','seurat_clusters','Treatment'))
+
+df_filtered <- df %>%
+  # filter(!is.na(celltype_merge) & celltype_merge != 'other') %>%
+  filter(!is.na(dCt_adj)) %>%           # <--- CRITICAL STEP: Remove MspI well with NA value now
+  group_by(seurat_clusters, Treatment) %>%
+  filter(n() >= 2) %>%
+  ungroup()
+
+compare_means(
+  formula         = dCt_adj ~ Treatment,
+  group.by        = "seurat_clusters",
+  data            = df_filtered,
+  method          = 't.test',
+  p.adjust.method = "fdr"
+)
+
+vlnplot_padj(filtered2_pass,
+             c('dCt_adj','seurat_clusters','Treatment','genotype_srsf2_2'),
+             facetorder = ord,  # use John suggested order
+             fill = col_group,
+             lims = lims)
+vlnplot_padj(filtered2_pass,
+             c('dCt_adj','seurat_clusters','Treatment','genotype_tet2a_2'),
+             facetorder = ord,
+             fill = col_group,
+             lims = lims)
+vlnplot_padj(filtered2_pass,
+             c('dCt_adj','seurat_clusters','Treatment','genotype_tet2b_2'),
+             facetorder = ord,
+             fill = col_group,
+             lims = lims)
+
+```
+
+### LINE1 by Dev Cell annotation (Azimuth)
+
+```{r, dev=c('png', 'pdf')}
+# All data (LINE1 and RNAseq passed)
+
+df <- FetchData(filtered2_pass,
+                vars = c('dCt_adj','predicted.RNA_clusters','Treatment'))
+
+df_filtered <- df %>%
+  # filter(!is.na(celltype_merge) & celltype_merge != 'other') %>%
+  filter(!is.na(dCt_adj)) %>%           # <--- CRITICAL STEP: Remove MspI well with NA value now
+  group_by(predicted.RNA_clusters, Treatment) %>%
+  filter(n() >= 2) %>%
+  ungroup()
+
+compare_means(
+  formula         = dCt_adj ~ Treatment,
+  group.by        = "predicted.RNA_clusters",
+  data            = df_filtered,
+  method          = 't.test',
+  p.adjust.method = "fdr"
+)
+
+vlnplot_padj(filtered2_pass,
+             c('dCt_adj','predicted.RNA_clusters','Treatment','genotype_srsf2_2'),
+             facetorder = names(col_ref),
+             fill = col_group,
+             lims = lims)
+vlnplot_padj(filtered2_pass,
+             c('dCt_adj','predicted.RNA_clusters','Treatment','genotype_tet2a_2'),
+             facetorder = names(col_ref),
+             fill = col_group,
+             lims = lims)
+vlnplot_padj(filtered2_pass,
+             c('dCt_adj','predicted.RNA_clusters','Treatment','genotype_tet2b_2'),
+             facetorder = names(col_ref),
+             fill = col_group,
+             lims = lims)
+
+```
+
+### LINE1 by cluster and FACS 
+```{r, fig.width=12, fig.height=12, dev=c('png', 'pdf')}
+
+# 2) Apply levels and plot
+filtered2_pass@meta.data %>%
+  filter(!Is_MspI) %>%
+  ggplot(aes(x = seurat_clusters, y = dCt_adj, fill = seurat_clusters)) +
+  geom_violin(trim = FALSE, scale = "width",
+              alpha = 0.9, width = 0.9, colour = NA, show.legend = FALSE) +
+  geom_boxplot(width = 0.15, outlier.alpha = 0.25, colour = "grey50",
+               fill = "white", alpha = 0.9, show.legend = FALSE) +
+  facet_wrap(~ celltype_merge) +
+  scale_fill_manual(
+    values   = col_cluster,
+    na.value = na_grey,
+    name     = 'Seurat Cluster'
+  ) +
+  labs(x = "Cluster (ordered by cluster mean dCt_adj)", y = "dCt_adj") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  force_panelsizes(rows = unit(3, 'inch'),
+                   cols = unit(3, 'inch'))
+
+
+```
+
+### LINE1 by cluster and FACS (SRSF2 genotype)
+```{r, fig.width=8, fig.height=18, dev=c('png', 'pdf')}
+filtered2_pass@meta.data %>%
+  filter(!Is_MspI) %>%
+  filter(genotype_srsf2 != 'unidentifiable') %>%
+  ggplot(aes(x = seurat_clusters, y = dCt_adj, fill = genotype_srsf2)) +
+  # paired violins per cluster
+  geom_violin(
+    aes(group = interaction(seurat_clusters, genotype_srsf2)),
+    trim = FALSE, scale = "width",
+    width = 0.9, colour = NA,
+    position = position_dodge(width = 0.8), alpha = 0.8
+  ) +
+  # paired boxplots exactly overlaid on the violins
+  geom_boxplot(
+    aes(group = interaction(seurat_clusters, genotype_srsf2)),
+    width = 0.15, outlier.alpha = 0.3, colour = "grey40",
+    fill = "white", alpha = 0.9,
+    position = position_dodge(width = 0.8)
+  ) +
+  facet_grid(celltype_merge ~ Treatment) +
+  scale_fill_manual(
+    values   = col_genotype,
+    na.value = na_grey,
+    name     = 'Genotype'
+  ) +
+  labs(
+    x = "Cluster",
+    y = "dCt_adj"
+  ) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  force_panelsizes(rows = unit(3, 'inch'),
+                   cols = unit(3, 'inch'))
+
+```
+
+
+```{r}
+sessionInfo()
+```

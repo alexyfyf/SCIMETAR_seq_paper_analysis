@@ -1,0 +1,15 @@
+
+left = TACGGCCGCC
+right = CCCGGACTCA   
+
+bcs = tsv('srsf2_flanking.tsv')            
+
+if read is [ _ left bc.sequence right _ ] for bc in bcs => {
+    count!(bc.name) 
+    '{read.id}\tR\t{bc.name}' |> out!('second_hits.tsv')
+} 
+[_] => {
+    count!('unmatched')  
+}
+
+

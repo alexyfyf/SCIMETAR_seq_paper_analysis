@@ -1,0 +1,292 @@
+---
+title: "QC"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+execute: 
+  cache: true
+  warning: false
+  error: false
+---
+
+## results from zUMI parameter
+
+Use zUMI default.
+```
+if [ ! -f $out_dir/*_Aligned.sortedByCoord.out.bam ]; then
+    # use new 2pass mode of STAR
+    STAR --twopassMode Basic \
+        --genomeDir $GENOME_DIR \
+        --readFilesIn ${R1} ${R2} \
+        --runThreadN ${ncpu} \
+        --sjdbGTFfile ${GTF} \
+        --sjdbOverhang ${sjdbOverhang} \
+        --readFilesCommand zcat \
+        --outSAMmultNmax 1 \
+        --outFilterMultimapNmax 50 \
+        --outSAMtype BAM SortedByCoordinate \
+        --outSAMattrRGline ID:${sample_ID} LB:library PL:illumina PU:machine SM:${sample_ID} \
+        --outFileNamePrefix $out_dir/${sample_ID}_ 
+
+    rm -rf $out_dir/*__STAR*    
+	samtools index $out_dir/${sample_ID}_Aligned.sortedByCoord.out.bam
+fi
+```
+```{r, fig.width=10, dev=c('png', 'pdf')}
+library(data.table)
+library(tidyverse)
+library(RColorBrewer)
+library(ggsci)
+
+## star summary
+
+star <- fread('../results/multiqc_wells/multiqc_report_data/star_alignment_plot.txt')
+
+# 
+colnames(star) <- c('Sample',
+  "Uniquely_mapped",
+  "Mapped_to_multiple_loci",
+  "Mapped_to_too_many_loci",
+  # "Unmapped_too_many_mismatches",
+  "Unmapped_too_short",
+  "Unmapped_other"
+)
+
+align_col <- pal_npg(palette = c("nrc"), alpha = 1)(6)
+names(align_col) <- colnames(star)[-1]
+
+star <- star %>%
+  # 1) Create a Total_Count column
+  mutate(Total_Count = rowSums(across(
+    c(Uniquely_mapped,
+      Mapped_to_multiple_loci,
+      Mapped_to_too_many_loci,
+      # Unmapped_too_many_mismatches,
+      Unmapped_too_short,
+      Unmapped_other))),
+  Sample = sub("^((?:[^_]+_){3}[^_]+).*", "\\1", Sample)) %>%
+  # 2) Create percentage columns for each category
+  mutate(across(
+    c(Uniquely_mapped,
+      Mapped_to_multiple_loci,
+      Mapped_to_too_many_loci,
+      # Unmapped_too_many_mismatches,
+      Unmapped_too_short,
+      Unmapped_other),
+    ~ (. / Total_Count) * 100,
+    .names = "{.col}_pct"
+  )) %>%
+  separate(Sample, c('Plate', 'Source', 'Treatment', 'Well'), remove = F) %>%
+  mutate(is.empty = str_detect(Well, 'A03|C12|F01|H08'))
+```
+
+### Summary of STAR aligner
+Number of aligned reads in each category
+```{r, fig.width=10, dev=c('png', 'pdf')}
+star[, c(1:11, 17)] %>%
+  pivot_longer(6:11) %>%
+  mutate(name = factor(name, levels = c('Total_Count', "Uniquely_mapped",
+                                        "Mapped_to_multiple_loci",
+                                        "Mapped_to_too_many_loci",
+                                        "Unmapped_too_short",
+                                        # "Unmapped_too_many_mismatches",
+                                        "Unmapped_other"))) %>%
+  ggplot(aes(x = Plate, y = value, fill = is.empty, color = is.empty)) +
+  geom_violin(width = 1.4, alpha = 0.5, position = position_dodge(width = 1)) +
+  geom_boxplot(width = 0.1, alpha = 0.5, position = position_dodge(width = 1)) +
+  facet_wrap(.~name, scales = 'free_y', ncol = 1) +
+  ylab('Number of reads') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+star[, c(1:10, 17)] %>%
+  pivot_longer(6:10) %>%
+  mutate(name = factor(name, levels = rev(c("Uniquely_mapped",
+                                        "Mapped_to_multiple_loci",
+                                        "Mapped_to_too_many_loci",
+                                        "Unmapped_too_short",
+                                        # "Unmapped_too_many_mismatches",
+                                        "Unmapped_other")))) %>%
+  ggplot(aes(x = Plate, y = value, fill = name
+  )) +
+  geom_col(position = 'stack') +
+  ylab('Number of reads') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_fill_manual(values = align_col)
+
+
+star[, c(1:10, 17)] %>%
+  pivot_longer(6:10) %>%
+  mutate(name = factor(name, levels = rev(c("Uniquely_mapped",
+                                        "Mapped_to_multiple_loci",
+                                        "Mapped_to_too_many_loci",
+                                        "Unmapped_too_short",
+                                        # "Unmapped_too_many_mismatches",
+                                        "Unmapped_other")))) %>%
+  ggplot(aes(x = Plate, y = value, fill = name
+  )) +
+  geom_col(position = 'fill') +
+  ylab('Proportion of reads') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_fill_manual(values = align_col)
+```
+
+
+```
+GTF="/vast/projects/lab_davidson/yan.a/ref/gencode/gencode.v44.annotation.gtf"
+
+ncpu=48
+
+# 5. featurecount with deduplicated bam
+
+featureCounts -a $GTF -o unstranded_counts.txt -p -T $ncpu  ../align/*/*_Aligned.sortedByCoord.out.bam
+```
+This default setting means
+```
+||             Output file : unstranded_counts.txt                            ||
+||                 Summary : unstranded_counts.txt.summary                    ||
+||              Paired-end : yes                                              ||
+||        Count read pairs : no                                               ||
+||              Annotation : gencode.v44.annotation.gtf (GTF)                 ||
+||      Dir for temp files : ./                                               ||
+||                                                                            ||
+||                 Threads : 48                                               ||
+||                   Level : meta-feature level                               ||
+||      Multimapping reads : not counted                                      ||
+|| Multi-overlapping reads : not counted                                      ||
+||   Min overlapping bases : 1      
+```
+Because the BAM files was not mark duplicates, so cannot see duplicate reads. I think the duplicate removal will be different from bulk RNAseq which simply look at read mapping coordinates.  
+```{r, fig.width=10, dev=c('png', 'pdf')}
+## featurecount
+
+fc <- fread('../results/multiqc_wells/multiqc_report_data/featureCounts_assignment_plot.txt')
+fc <- fc[,-3] # remove unmapped counts
+
+colnames(fc) <- c('Sample',
+                    "Assigned",
+                    "Unassigned_Multi_Mapping",
+                    "Unassigned_No_Features",
+                    "Unassigned_Ambiguity")
+
+fc_col <- pal_npg(palette = c("nrc"), alpha = 1)(4)
+names(fc_col) <- colnames(fc)[-1]
+
+fc <- fc %>%
+  # 1) Create a Total_Count column
+  mutate(Total_Count = rowSums(across(
+    c(Assigned,
+      Unassigned_Multi_Mapping,
+      Unassigned_No_Features,
+      Unassigned_Ambiguity))),
+    Sample = sub("^((?:[^_]+_){3}[^_]+).*", "\\1", Sample)) %>%
+  # 2) Create percentage columns for each category
+  mutate(across(
+    c(Assigned,
+      Unassigned_Multi_Mapping,
+      Unassigned_No_Features,
+      Unassigned_Ambiguity),
+    ~ (. / Total_Count) * 100,
+    .names = "{.col}_pct"
+  )) %>%
+  separate(Sample, c('Plate', 'Source', 'Treatment', 'Well'), remove = F) %>%
+  mutate(is.empty = str_detect(Well, 'A03|C12|F01|H08'))
+
+```
+
+
+### Summary of featurecount
+Number of counted reads in each category
+```{r, fig.width=10, dev=c('png', 'pdf')}
+fc[, c(1:10, 15)] %>%
+  pivot_longer(6:10) %>%
+  mutate(name = factor(name, levels = c('Total_Count', "Assigned",
+                                        "Unassigned_Multi_Mapping",
+                                        "Unassigned_No_Features",
+                                        "Unassigned_Ambiguity"))) %>%
+  ggplot(aes(x = Plate, y = value, fill = is.empty, color = is.empty)) +
+  geom_violin(width = 1.4, alpha = 0.5, position = position_dodge(width = 1)) +
+  geom_boxplot(width = 0.1, alpha = 0.5, position = position_dodge(width = 1)) +
+  facet_wrap(.~name, scales = 'free_y', ncol = 1) +
+  ylab('Number of reads') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+fc[, c(1:10, 15)] %>%
+  pivot_longer(6:9) %>%
+  mutate(name = factor(name, levels = rev(c("Assigned",
+                                        "Unassigned_Multi_Mapping",
+                                        "Unassigned_No_Features",
+                                        "Unassigned_Ambiguity")))) %>%
+  ggplot(aes(x = Plate, y = value, fill = name
+  )) +
+  geom_col(position = 'stack') +
+  ylab('Number of reads') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_fill_manual(values = fc_col)
+
+fc[, c(1:10, 15)] %>%
+  pivot_longer(6:9) %>%
+  mutate(name = factor(name, levels = rev(c("Assigned",
+                                        "Unassigned_Multi_Mapping",
+                                        "Unassigned_No_Features",
+                                        "Unassigned_Ambiguity")))) %>%
+  ggplot(aes(x = Plate, y = value, fill = name
+  )) +
+  geom_col(position = 'fill') +
+  ylab('Proportion of reads') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_fill_manual(values = fc_col)
+
+```
+
+### Number of exonic reads based on qualimap
+
+```{r, fig.width=10, dev=c('png', 'pdf')}
+qual_map <- fread('../results/multiqc_merged/multiqc_report_data/qualimap_rnaseq_genome_results.txt') %>%
+  # 1) Create a Total_Count column
+  mutate(Total_Count = rowSums(across(
+    c(reads_aligned_exonic,
+      reads_aligned_intronic,
+      reads_aligned_intergenic,
+      reads_aligned_overlapping_exon)))) %>%
+  # 2) Create percentage columns for each category
+  mutate(across(
+    c(reads_aligned_exonic,
+      reads_aligned_intronic,
+      reads_aligned_intergenic,
+      reads_aligned_overlapping_exon),
+    ~ (. / Total_Count) * 100,
+    .names = "{.col}_pct"
+  )) 
+  
+qual_map %>% 
+  mutate(methods = 'zUMI', Sample = sub("^([^_]+_[^_]+).*", "\\1", Sample)) %>%
+  pivot_longer(c(9:12), names_to = 'Genomic_feature', values_to = 'Number_assigned') %>%
+  mutate(Genomic_feature = factor(Genomic_feature, 
+                                  levels = rev(c("reads_aligned_exonic","reads_aligned_intronic","reads_aligned_intergenic","reads_aligned_overlapping_exon")),
+                                  labels = rev(c('exonic','intronic','intergenic','overlapping_exon')))) %>%
+  unite("group", c(Sample, methods), remove = F) %>%
+  ggplot(aes(x = group, y = Number_assigned, fill = Genomic_feature)) +
+  geom_col(position = 'stack') +
+  ylab('Number of reads') + 
+  # facet_wrap(.~methods, scales = 'free_y', ncol = 1) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  
+
+qual_map %>% 
+  mutate(methods = 'zUMI', Sample = sub("^([^_]+_[^_]+).*", "\\1", Sample)) %>%
+  pivot_longer(c(9:12), names_to = 'Genomic_feature', values_to = 'Number_assigned') %>%
+  mutate(Genomic_feature = factor(Genomic_feature, 
+                                  levels = rev(c("reads_aligned_exonic","reads_aligned_intronic","reads_aligned_intergenic","reads_aligned_overlapping_exon")),
+                                  labels = rev(c('exonic','intronic','intergenic','overlapping_exon')))) %>%
+  unite("group", c(Sample, methods), remove = F) %>%
+  ggplot(aes(x = group, y = Number_assigned, fill = Genomic_feature)) +
+  geom_col(position = 'fill') +
+  ylab('Proportion of reads') + 
+  # facet_wrap(.~methods, scales = 'free_y', ncol = 1) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+```

@@ -1,0 +1,19 @@
+seqs = tsv('mutation.tsv')
+
+if read.r1 is [_ s.sequence _] for s in seqs => {
+    count!('R1:{s.name}', name='hits')
+    '{read.r1.id}\tR1\t{s.name}' |> out!('mate_hits.tsv')
+}
+[_] => {
+    count!('R1:unmatched') 
+    read.r1.out!('tmp/no_r1.fq') 
+}
+
+if -read.r2 is [_ s.sequence _] for s in seqs => {
+    count!('R2:{s.name}', name='hits')
+    '{read.r2.id}\tR2rc\t{s.name}' |> out!('mate_hits.tsv')
+}
+[_] => {
+    count!('R2:unmatched') 
+    read.r2.out!('tmp/no_r2.fq') 
+}

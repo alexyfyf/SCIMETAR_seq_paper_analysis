@@ -1,0 +1,337 @@
+---
+title: "SCIMETAR single cell analysis (Flitered by RPKM) add LINE1, FACS and amplicon data"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+    number-sections: true
+    number-depth: 3
+execute: 
+  cache: true
+  warning: false
+  error: false
+---
+
+## Load filtered and annotated seurat object 
+
+```{r, dev=c('png', 'pdf')}
+library(matrixStats)
+library(ggfortify)
+library(Seurat)
+library(edgeR)
+library(tidyverse)
+library(DT)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggpubr)
+library(EnhancedVolcano)
+library(ggh4x)
+library(viridis)
+library(patchwork)
+library(readxl)
+library(RColorBrewer)
+library(UpSetR)
+library(data.table)
+library(ggsankey)
+library(ggalluvial)
+library(ggrepel)
+library(scales)
+library(ggsci)
+```
+
+
+```{r}
+
+filtered2 <- readRDS("output/filtered2.rds")
+
+na_grey   <- "grey85"            # any NA in celltype_merge
+
+# use the Dev Cell colors extracted, same order as the weblink
+col_ref <- c(
+  HSC   = "#ED6D52",
+  MPP1  = "#F5C3CB",
+  MPP2  = "#DF87E8",
+  LMPP  = "#5DCBCF",
+  MLP   = "#4A895B",
+  MEP   = "#8E71D5",
+  Neu1  = "#F2A93B",
+  B_NK1 = "#75FB8C",
+  Neu2  = "#C3884D",
+  MD    = "#EFE697",
+  EBM   = "#FADFB3",
+  Mk    = "#4A68DA",
+  Ery   = "#97CCE7",
+  B_NK2 = "#A6EB99"
+)
+
+col_celltype <- c(
+  DEV_HSC   = "#ED6D52", FACS_HSC = "#ED6D52", 
+  DEV_MPP1  = "#F5C3CB", #FACS_MHSC = "#DF87E8", 
+  FACS_MPP = "#F5C3CB",
+  DEV_MPP2  = "#DF87E8",
+  DEV_MEP   = "#8E71D5", FACS_MEP = "#8E71D5",
+  DEV_Ery   = "#97CCE7",
+  DEV_Mk    = "#4A68DA",
+  DEV_LMPP  = "#5DCBCF", FACS_LMPP = "#5DCBCF", FACS_CMP = "#F2A93B", 
+  DEV_MLP   = "#4A895B", FACS_CLP = "#4A895B",
+  DEV_B_NK1 = "#75FB8C",
+  DEV_B_NK2 = "#A6EB99",
+  DEV_Neu1  = "#F2A93B", FACS_GMP = "#C3884D", 
+  DEV_Neu2  = "#C3884D",
+  DEV_MD    = "#EFE697",
+  DEV_EBM   = "#FADFB3"
+)
+
+col_celltype <- col_celltype[c(
+  "FACS_HSC",'DEV_HSC',
+  "FACS_MHSC","FACS_MPP","DEV_MPP1","DEV_MPP2",
+  "FACS_CMP","FACS_LMPP",'DEV_LMPP',
+  "FACS_GMP", "DEV_Neu1","FACS_MEP",'DEV_MEP',"FACS_CLP","DEV_MLP",
+  "DEV_Neu2","DEV_B_NK1",
+  "DEV_MD","DEV_EBM","DEV_Ery","DEV_Mk")]
+
+# col_facs <- setNames(pal_npg("nrc")(10)[1:9], filtered2@meta.data$celltype_merge %>% factor %>% levels)
+# col_facs["other"] <- "grey50"        # explicit grey for “other”
+col_facs <- c(
+  HSC = "#ED6D52",
+  #MHSC = "#DF87E8", 
+  MPP = "#F5C3CB",
+  LMPP = "#5DCBCF",
+  CMP = "#F2A93B", 
+  CLP = "#4A895B",
+  MEP = "#8E71D5",
+  GMP = "#C3884D",
+  other = "grey50"
+)
+
+# col_group <- setNames(brewer.pal(12, "Paired")[c(3:6)], filtered2@meta.data$group %>% factor %>% levels)
+col_group <- c("C4D1_C4D1" = "#80cdc1", 
+               "C4D8_C4D8" = "#018571"
+               # "C4D8_C4D8" = "#dfc27d",
+               # 'Primary_Patient_AZA' = "#a6611a"
+               )
+
+col_cluster <- setNames(brewer.pal(12, "Set3")[c(1,3:8,10,11)], 0:8)
+
+col_treatment <- setNames(brewer.pal(2, "Set2")[1:2], c('C4D1','C4D8'))
+
+col_source <- setNames(c("#018571" , "#a6611a"), c('GR', 'Primary_Patient'))
+
+col_phase <- c(G1='#663399', G2M='#E66100', S='#2A934E')
+
+col_genotype <- c(
+  "unidentifiable" = '#d9d9d9',
+  "wt/wt" = '#253494',
+  "mut/wt" = '#dd1c77',
+  # "mut/mut" = '#980043',
+  "mut/mut" = '#dd1c77'
+)
+
+# 2 group genotype
+filtered2 <- AddMetaData(filtered2, 
+                         metadata = data.frame(genotype_srsf2_2 = str_replace(filtered2$genotype_srsf2, 'mut/mut','mut/wt'),
+                                               genotype_tet2a_2 = str_replace(filtered2$genotype_tet2a, 'mut/mut','mut/wt'),
+                                               genotype_tet2b_2 = str_replace(filtered2$genotype_tet2b, 'mut/mut','mut/wt'),
+                                               dCt_adj.limma_ctrl_p = ifelse(filtered2$Is_MspI, NA, filtered2$dCt_adj.limma_ctrl_p)))
+
+## 1454 LINE1 pass cells, 
+filtered2_pass <- subset(filtered2, subset = keep_median & dCt > 0)
+
+```
+
+## DEG analysis
+
+### DEG analysis in each cluster comparing the top 1/3 vs bottom 1/3 based on LINE1
+* Only remove failed RNAseq cells.  
+* Cell.1 is top and Cell.2 is bottom.  
+* Positive logFC means higher expression in top.
+* Use limma_ctrl_p 
+
+```{r,fig.width=12, fig.height=7,  dev=c('png', 'pdf')}
+# 1345 cells removing MspI
+filtered2_pass <- subset(filtered2_pass, subset = Is_MspI == FALSE)
+
+gencode_gtf <- readRDS('/home/users/allstaff/yan.a/lab_davidson/yan.a/ref/gencode/gencodev44.rds')
+
+genes <- gencode_gtf %>% plyranges::filter(type=='gene') %>%
+  plyranges::select(gene_id, gene_name) %>% data.frame()
+
+m <- genes$gene_id %>%
+  str_remove("\\..*") %>%
+  unique() %>%
+  bitr(fromType = "ENSEMBL",
+       toType   = c("ENTREZID","SYMBOL"),
+       OrgDb    = org.Hs.eg.db)
+
+m1 <- m %>%
+  left_join(genes %>% transmute(ENSEMBL = str_remove(gene_id, "\\..*"),
+                                gene_name),
+            by = "ENSEMBL") %>%
+  mutate(match_name = (!is.na(gene_name) & SYMBOL == gene_name)) %>%
+  arrange(ENSEMBL, desc(match_name), is.na(ENTREZID)) %>%  # prefer name match, then non-NA
+  distinct(ENSEMBL, .keep_all = TRUE) %>%
+  dplyr::select(-gene_name, -match_name)
+
+genes <- genes %>% 
+  mutate(ENSEMBL = str_remove(gene_id, "\\..*")) %>% 
+  left_join(m1, by = 'ENSEMBL')
+
+deglist.cl2 <- lapply(0:4, function(x){
+  sub <- subset(filtered2_pass, subset = seurat_clusters == x)
+  
+  median <- median(sub$dCt_adj.limma_ctrl_p)
+  tercicle <- quantile(sub$dCt_adj.limma_ctrl_p, probs = seq(0, 1, length.out = 4))
+  
+  sub <- AddMetaData(sub, 
+                     metadata = data.frame(Median = ifelse(sub$dCt_adj.limma_ctrl_p >= median, 'top','bottom'),
+                                           Terciles = ifelse(sub$dCt_adj.limma_ctrl_p >= tercicle[3], 'top', 
+                                                             ifelse(sub$dCt_adj.limma_ctrl_p < tercicle[2], 'bottom', 'other'))))
+  deg <- tryCatch({
+    FindMarkers(
+      object        = sub,
+      ident.1       = "top",               # which treatment to test
+      ident.2       = "bottom",              # what to compare against, baseline
+      group.by      = "Terciles",         # which metadata column defines AZA vs DMSO
+      # subset.ident  = "Primary_CB34",   # first subset to only these cells
+      only.pos      = FALSE
+    ) %>% rownames_to_column(var = 'gene_name') %>%
+      left_join(genes, by = 'gene_name')
+  }, error = function(e) data.frame())
+})
+ 
+names(deglist.cl2) <- paste0('Cluster', 0:4)
+
+gene.list.cl2 <- lapply(deglist.cl2, function(x) {
+  if (nrow(x) != 0) {
+      x %>% filter(p_val < 0.05) %>% pull(ENTREZID)
+  }
+})
+
+fromList(gene.list.cl2) %>%
+  UpSetR::upset()
+
+go.cl2 <- gene.list.cl2 %>%
+  compareCluster(fun = 'enrichGO', OrgDb = org.Hs.eg.db, ont = 'BP', readable = T) %>%
+  clusterProfiler::simplify()
+
+dotplot(go.cl2)
+
+# # collapse all DE tables into one and summarise a single logFC per gene
+# fc <- bind_rows(deglist.cl2, .id = "Cluster") %>%
+#   filter(!is.na(SYMBOL), SYMBOL != "") %>%
+#   group_by(SYMBOL) %>%
+#   summarise(logFC = mean(avg_log2FC, na.rm = TRUE), .groups = "drop") %>%
+#   deframe()   # named numeric vector: names are SYMBOL
+
+cnetplot(go.cl2, 
+         #color.params = list(foldChange = fc),  # preferred (newer enrichplot)
+         #fc_threshold = 0
+         )
+
+lapply(names(deglist.cl2), function(x) {
+  if (nrow(deglist.cl2[[x]]) != 0) {
+      deglist.cl2[[x]] %>% mutate(comparison = x) %>%
+    filter(p_val < 0.05)
+  }
+}) %>% rbindlist() %>%
+  write.csv(., file = 'output/line1_deg_withincluster2.csv', quote = F, row.names = F)
+
+write.csv(go.cl2@compareClusterResult, 
+           file = 'output/line1_deg_withincluster_go2.csv', quote = F, row.names = F)
+```
+
+
+### DEG analysis in each timepoint comparing the top 1/3 vs bottom 1/3 based on LINE1
+* Only remove failed RNAseq cells.  
+* Cell.1 is top and Cell.2 is bottom.  
+* Positive logFC means higher expression in top.
+* Use limma_ctrl_p 
+
+```{r,fig.width=12, fig.height=7,  dev=c('png', 'pdf')}
+# 1345 cells removing MspI
+
+deglist.tp2 <- lapply( c('C4D1', 'C4D8', 'Both'), function(x){
+    if (x != 'Both') {
+    sub <- subset(filtered2_pass, subset = Cell_Type == x)
+  } else {
+    sub <- filtered2_pass
+  }
+  
+  median <- median(sub$dCt_adj.limma_ctrl_p)
+  tercicle <- quantile(sub$dCt_adj.limma_ctrl_p, probs = seq(0, 1, length.out = 4))
+  
+  sub <- AddMetaData(sub, 
+                     metadata = data.frame(Median = ifelse(sub$dCt_adj.limma_ctrl_p >= median, 'top','bottom'),
+                                           Terciles = ifelse(sub$dCt_adj.limma_ctrl_p >= tercicle[3], 'top', 
+                                                             ifelse(sub$dCt_adj.limma_ctrl_p < tercicle[2], 'bottom', 'other'))))
+  deg <- tryCatch({
+    FindMarkers(
+      object        = sub,
+      ident.1       = "top",               # which treatment to test
+      ident.2       = "bottom",              # what to compare against, baseline
+      group.by      = "Terciles",         # which metadata column defines AZA vs DMSO
+      # subset.ident  = "Primary_CB34",   # first subset to only these cells
+      only.pos      = FALSE
+    ) %>% rownames_to_column(var = 'gene_name') %>%
+      left_join(genes, by = 'gene_name')
+  }, error = function(e) data.frame())
+})
+ 
+names(deglist.tp2) <- c('C4D1', 'C4D8', 'Both')
+
+gene.list.tp2 <- lapply(deglist.tp2, function(x) {
+  if (nrow(x) != 0) {
+      x %>% filter(p_val < 0.05) %>% pull(ENTREZID)
+  }
+})
+
+fromList(gene.list.tp2) %>%
+  UpSetR::upset()
+
+go.tp2 <- gene.list.tp2 %>%
+  compareCluster(fun = 'enrichGO', OrgDb = org.Hs.eg.db, ont = 'BP', readable = T) %>%
+  clusterProfiler::simplify()
+
+dotplot(go.tp2)
+
+cnetplot(go.tp2, 
+         #color.params = list(foldChange = fc),  # preferred (newer enrichplot)
+         #fc_threshold = 0
+         )
+
+lapply(names(deglist.tp2), function(x) {
+  if (nrow(deglist.tp2[[x]]) != 0) {
+      deglist.tp2[[x]] %>% mutate(comparison = x) %>%
+    filter(p_val < 0.05)
+  }
+}) %>% rbindlist() %>%
+  write.csv(., file = 'output/line1_deg_timepoint2.csv', quote = F, row.names = F)
+
+write.csv(go.tp2@compareClusterResult, 
+           file = 'output/line1_deg_timepoint_go2.csv', quote = F, row.names = F)
+
+gene.list.tp2.split <- c(lapply(deglist.tp2, function(x) {
+  if (nrow(x) != 0) { x %>% filter(p_val < 0.05, avg_log2FC > 0) %>% pull(ENTREZID) }
+}),  lapply(deglist.tp2, function(x) {
+  if (nrow(x) != 0) { x %>% filter(p_val < 0.05, avg_log2FC < 0) %>% pull(ENTREZID) }
+}))
+names(gene.list.tp2.split) <- paste0(names(gene.list.tp2.split), rep(c('_up', '_down'), each = 3))
+
+fromList(gene.list.tp2.split) %>%
+  UpSetR::upset(sets = names(gene.list.tp2.split))
+
+go.tp2.split <- gene.list.tp2.split %>%
+  compareCluster(fun = 'enrichGO', OrgDb = org.Hs.eg.db, ont = 'BP', readable = T) %>%
+  clusterProfiler::simplify()
+
+dotplot(go.tp2.split)
+cnetplot(go.tp2.split
+         # , foldChange = setNames(deg.pp$avg_log2FC, deg.pp$ENTREZID)
+         )
+
+write.csv(go.tp2.split@compareClusterResult, 
+           file = 'output/line1_deg_timepoint_go_splitdirection2.csv', quote = F, row.names = F)
+```
+

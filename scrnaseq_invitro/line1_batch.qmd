@@ -1,0 +1,134 @@
+---
+title: "SCIMETAR LINE-1 qPCR batch correction"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+    number-sections: true
+    number-depth: 3
+execute:
+  warning: false
+  error: false
+  cache: true
+---
+
+## load precomputed csv and cell type annotation
+
+```{r, fig.width=15, fig.height=10, dev=c('png', 'pdf')}
+
+library(readxl)
+library(tidyverse)
+library(corrplot)
+library(DT)
+
+All_cell_assignments <- read_excel("data/All_cell_assignments_allCD34pos.xlsx") %>%
+  separate(Plate_Well, c('Plate', NA,NA,'Well_ID'), remove = F) %>%
+  mutate(Plate = str_remove(Plate, '^P') %>% as.numeric())
+
+pcr2 <- read.csv('output/LINE1_qPCR_all.csv')
+
+```
+
+## batch correction with limma
+Need to exclude MDSL, when including MDSL, there are weird correction occurring in the MDSL plates
+
+```{r, fig.width=15, fig.height=10, dev=c('png', 'pdf')}
+
+## use limma batch correction
+## notice a well with negative dCt which affect the performance of correction
+library(limma)
+
+# 1) Build a design matrix for your groups
+group <- pcr2 %>% filter(keep_median & dCt > 0 & Cell_Type != 'MDSL') %>%
+  pull(group) %>% factor()
+design <- model.matrix(~ 0 + group)
+colnames(design) <- levels(group)
+
+# 2) Remove the plate effect, preserving the group means
+
+mat <- pcr2 %>% 
+  filter(keep_median & dCt > 0 & Cell_Type != 'MDSL') %>% 
+  select(HEX_Ref:FAM_Tar) %>% t()
+
+batch <- pcr2 %>% filter(keep_median & dCt > 0 & Cell_Type != 'MDSL') %>%
+  pull(Plate)
+
+mat_corrected <- removeBatchEffect(
+  mat,
+  batch  = batch,
+  design = design
+)
+
+mat_corrected <- t(mat_corrected)
+colnames(mat_corrected) <- c("HEX_adj",'FAM_adj')
+pcr3 <- cbind(pcr2 %>% filter(keep_median & dCt > 0 & Cell_Type != 'MDSL'), 
+              mat_corrected) %>%
+  mutate(dCt_adj = FAM_adj - HEX_adj)
+
+pcr3 %>% 
+  filter(keep_median & dCt > 0 & Cell_Type != 'MDSL') %>%
+  ggplot(aes(x= factor(Plate), y = dCt_adj, fill = group)) +
+  geom_violin(trim = F) +
+  geom_boxplot(width = 0.1, position = position_dodge(width = 0.9)) + 
+  theme(legend.position = "bottom"
+  ) +
+  labs(y = "dCT value",
+       x = "group",
+       title = "corrected dCT value by group (plate separated)")
+
+cat("Summary of delta Ct values in passed wells before and after correction.\n")
+data.frame(before = pcr2 %>% 
+             filter(keep_median & dCt > 0 & Cell_Type != 'MDSL') %>% 
+             group_by(Plate) %>% 
+             summarise(mean = mean(dCt, na.rm = T), median = median(dCt, na.rm = T)),
+           after = pcr3 %>% 
+             filter(keep_median & dCt > 0 & Cell_Type != 'MDSL') %>% 
+             group_by(Plate) %>% 
+             summarise(mean = mean(dCt_adj, na.rm = T), median = median(dCt_adj, na.rm = T))) %>%
+  datatable() %>% formatRound(
+    columns = c(2,3,5,6),
+    digits  = 2
+  )
+
+data.frame(before = pcr2 %>% 
+             filter(keep_median & dCt > 0 & Cell_Type != 'MDSL') %>% 
+             group_by(group) %>% 
+             summarise(mean = mean(dCt, na.rm = T), median = median(dCt, na.rm = T)),
+           after = pcr3 %>% 
+             filter(keep_median & dCt > 0 & Cell_Type != 'MDSL') %>% 
+             group_by(group) %>% 
+             summarise(mean = mean(dCt_adj, na.rm = T), median = median(dCt_adj, na.rm = T))) %>%
+  datatable() %>% formatRound(
+    columns = c(2,3,5,6),
+    digits  = 2
+  )
+
+```
+
+
+```{r}
+pcr_combined <- bind_rows(
+  pcr3,
+  anti_join(pcr2 %>%
+              mutate(dCt_adj = ifelse(Cell_Type == 'MDSL',dCt, NA)), 
+            pcr3, 
+            by = names(pcr2)[1:2])
+) %>% mutate(line_pass = keep_median & dCt > 0)
+
+dct_dmso_avg <- pcr2 %>%
+  filter(Treatment == 'DMSO') %>%
+  group_by(group, Cell_Type, Treatment) %>%
+  summarise(dct_dmso_avg = mean(dCt, na.rm = T))
+
+dct_dmso_avg
+
+pcr_combined <- pcr_combined %>% 
+  left_join(dct_dmso_avg, 
+            by = c('Cell_Type'),
+            suffix = c('', '.adj')) 
+
+write.csv(pcr_combined, 'output/LINE1_qPCR_corrected.csv')
+
+```

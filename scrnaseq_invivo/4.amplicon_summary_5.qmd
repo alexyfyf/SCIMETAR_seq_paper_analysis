@@ -1,0 +1,154 @@
+---
+title: "Amplicon summary"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+    number-sections: true
+    number-depth: 3
+execute:
+  warning: false
+  error: false
+  cache: true
+---
+
+```{r, fig.width=15, fig.height=10, dev=c('png', 'pdf')}
+
+library(ggplot2)
+library(tidyverse)
+library(data.table)
+library(readxl)
+library(ggpubr)
+library(future.apply)
+source('../script/summarize_mutation_file.R')
+
+```
+
+## Load new demux and mut calling results
+
+Now we first demultiplex using the barcode and still keep R1 and R2 separately (reads cannot demux are discarded).
+
+1\. In round 1: For R1 and R2, we try to do mutation calling separately and record if mutation is found in R1 and R2-reverse complement using an exact match 5bp centred around the mutation sites. Reads are marked with R1 or R2rc.\
+2. In round 2: For the R1 and R2 that did not pass round 1 (unmatched), we search again only for SRSF, now we use 10bp flanking the mutation site, and allow for 10% mismatch (equivalent to 1 bp). Reads are marked with R1_2.
+
+\
+Then we count:
+
+1\. SRSF2 as reads with mutations or WT in R2 only, or both R1/R2rc.
+
+2\. TET2a as reads with mutations or WT in R1 only or both R1/R2rc.
+
+3\. TET2b as reads with mutations or WT in R2 only or both R1/R2rc.
+
+```{r, fig.width=15, fig.height=10, dev=c('png', 'pdf')}
+
+files.mut1 <- list.files('../amplicon/run1/', '_merged_all_hits.tsv', recursive = T, full.names = T)
+
+plan(multisession, workers = 10)
+
+mut1.summary <- future_lapply(files.mut1, 
+               summarize_mutation_file)
+
+mutation_stats1 <- future_lapply(1:length(files.mut1), function(x) {
+  mut1.summary[[x]] %>% 
+  mutate(file = basename(files.mut1[x])) %>% 
+  separate(file, c("Plate", 'Well')) %>%
+  separate(mutation, c("Gene", "genotype"), remove = F) %>%
+  dplyr::rename(interaction = mutation) %>%
+  filter(
+    (str_detect(interaction, "tet2a") & read_types %in% c("R1_R2rc", "R1")) |
+    (str_detect(interaction, "tet2b") & read_types %in% c("R1_R2rc", "R2rc")) |
+    (str_detect(interaction, "srsf2") & (read_types %in% c("R1_R2rc", "R2rc")))
+  ) %>%
+  group_by(interaction, Plate, Well) %>%
+  summarize(Count = sum(read_count, na.rm = TRUE))
+}) %>% rbindlist() 
+```
+
+```{r, fig.width=15, fig.height=10, dev=c('png', 'pdf')}
+
+files.mut2 <- list.files('../amplicon/run2/', '_merged_all_hits.tsv', recursive = T, full.names = T)
+mut2.summary <- future_lapply(files.mut2, 
+               summarize_mutation_file)
+
+mutation_stats2 <- future_lapply(1:length(files.mut2), function(x) {
+  mut2.summary[[x]] %>% 
+  mutate(file = basename(files.mut2[x])) %>% 
+  separate(file, c("Plate", 'Well')) %>%
+  separate(mutation, c("Gene", "genotype"), remove = F) %>%
+  dplyr::rename(interaction = mutation) %>%
+  filter(
+    (str_detect(interaction, "tet2a") & read_types %in% c("R1_R2rc", "R1")) |
+    (str_detect(interaction, "tet2b") & read_types %in% c("R1_R2rc", "R2rc")) |
+    (str_detect(interaction, "srsf2") & (read_types %in% c("R1_R2rc", "R2rc") ))
+  ) %>%
+  group_by(interaction, Plate, Well) %>%
+  summarize(Count = sum(read_count, na.rm = TRUE))
+}) %>% rbindlist() 
+```
+
+```{r, fig.width=15, fig.height=10, dev=c('png', 'pdf')}
+list(mutation_stats1 %>% separate(interaction, c('Gene','genotype'), remove = F) %>% mutate(version = 'Run1'),
+     mutation_stats2 %>% separate(interaction, c('Gene','genotype'), remove = F) %>% mutate(version = 'Run2')) %>%
+  rbindlist(use.names=TRUE) %>%
+  filter(interaction != 'unmatched_unmatched') %>%
+  ggplot(aes(x = interaction, y = Count, fill = version)) +
+  geom_col(position = "dodge") +
+  facet_wrap(. ~ Plate, nrow = 6, scales = 'free_y') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+
+```{r, dev=c('png', 'pdf')}
+list(mutation_stats1 %>% separate(interaction, c('Gene','genotype'), remove = F) %>% mutate(version = 'V1'),
+     mutation_stats2 %>% separate(interaction, c('Gene','genotype'), remove = F) %>% mutate(version = 'V2')) %>%
+  rbindlist(use.names=TRUE) %>%
+  filter(interaction %in% c('srsf2_wt','srsf2_mut')) %>% 
+  # The 'genotype' column corresponds to your requested 'mutation' facet
+  pivot_wider(
+    names_from = version,
+    values_from = Count,
+    id_cols = c(interaction, Gene, genotype, Plate, Well)
+  ) %>% 
+  # --- 3. Generate the scatter plot with facets and color ---
+  ggplot(aes(x = V1, y = V2, color = Plate)) +
+  # Add the points
+  geom_point(size = 3) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
+  # Create a facet for each 'mutation' (genotype)
+  facet_wrap(~ genotype) +
+  # Add labels and a title for clarity
+  labs(
+    x = "Run1 Count",
+    y = "Run2 Count",
+    title = "Scatter Plot of Run1 vs Run2 Counts",
+    color = "Plate"
+  ) 
+```
+
+```{r, dev=c('png', 'pdf')}
+write.csv(mutation_stats1, 'output/mutation_stats1.csv', row.names = F)
+write.csv(mutation_stats2, 'output/mutation_stats2.csv', row.names = F)
+
+pcr2 <- read.csv('output/LINE1_qPCR_all_corrected.csv')
+
+df_wide2 <- mutation_stats1 %>%
+  left_join(mutation_stats2, by = c("interaction",  "Plate",   "Well"),
+            suffix = c('.run1', '.run2')) %>%
+  replace_na(list(Count.run1 = 0, Count.run2 = 0)) %>% 
+  complete(interaction, Plate, Well, fill = list(Count.run1 = 0, Count.run2 = 0)) %>%
+  mutate(Count = Count.run1 + Count.run2) %>%
+  separate(interaction, c('Gene','genotype')) %>% 
+  # mutate(version = 'V2') %>%
+  left_join(pcr2, by = c('Plate', 'Well')) %>%
+  filter(genotype %in% c("wt", "mut")) %>%   # drop “unmatched” or other genotypes if you only want wt+mut
+  select(-Count.run1, -Count.run2) %>% 
+  pivot_wider(
+    names_from   = genotype,
+    values_from  = Count
+  )
+write.csv(df_wide2, 'output/amplicon_read_num_sum_revise3.csv')
+
+```

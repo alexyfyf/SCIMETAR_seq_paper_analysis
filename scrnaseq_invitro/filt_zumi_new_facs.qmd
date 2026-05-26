@@ -1,0 +1,687 @@
+---
+title: "SCIMETAR single cell analysis (Flitered by RPKM) add LINE1, FACS and amplicon data"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+    number-sections: true
+    number-depth: 3
+execute: 
+  cache: true
+  warning: false
+  error: false
+---
+
+## Load filtered cells 
+
+
+```{r, dev=c('png', 'pdf')}
+library(matrixStats)
+library(ggfortify)
+library(Seurat)
+library(edgeR)
+library(tidyverse)
+library(DT)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggpubr)
+library(EnhancedVolcano)
+library(ggh4x)
+library(viridis)
+library(patchwork)
+library(readxl)
+library(RColorBrewer)
+library(UpSetR)
+library(data.table)
+library(ggsankey)
+library(ggalluvial)
+library(ggrepel)
+library(scales)
+library(ggsci)
+library(Azimuth)
+```
+
+```{r}
+seuratobj <- readRDS('output/seurat_zumi_rpkm_unfilt2.rds')
+```
+
+
+I use nFeature_RNA > 2000 & not empty & remove DEAD cells in FACS annotation.  
+Also remove MDSL cells. Use new FACS annotation without IMM subtype.  
+There are 1734 cells passed the filter.  
+```{r}
+## load FACS data
+All_cell_assignments <- read_excel("data/All_cell_assignments_allCD34pos.xlsx") %>%
+  separate(Plate_Well, c('Plate', NA,NA,'Well_ID'), remove = F) %>%
+  mutate(Plate = str_remove(Plate, '^P') %>% as.numeric())
+
+## load LINE1 data
+pcr <- read.csv('output/LINE1_qPCR_corrected.csv', row.names = 1) 
+
+## load amplicond data, new version
+amplicon <- read.csv('output/genotyped_data_2025-12-02.csv') %>%
+  dplyr::select(c(1:2,11:19)) %>%
+  mutate(Plate2 = Plate, Well_ID = Well) %>%
+  mutate(Plate = str_remove(Plate2, '^P') %>% as.numeric()) %>%
+  mutate(across(matches("wt_|mut_"), ~ log1p(.x), 
+                .names = "{.col}_log1p"))
+
+master <- left_join(pcr, All_cell_assignments,
+                    by = c('Plate','Well_ID')) %>%
+  left_join(amplicon, by = c('Plate','Well_ID')) %>%
+  mutate( # use healthy cell type
+    celltype_merge = factor(celltype_Healthy,
+                                 levels = c("HSC","MPP","LMPP","CMP","CLP","MEP","GMP","other",'DEAD')),
+         group = factor(group, 
+                        levels = c("Primary_CB34_DMSO","Primary_CB34_AZA","Primary_Patient_DMSO","Primary_Patient_AZA" )))
+
+rownames(master) <- master$Transcriptome.ID
+write.csv(master, 'output/master.csv', quote = F, row.names = F)
+
+seuratobj <- AddMetaData(seuratobj, 
+                         master)
+
+filtered2 <- subset(seuratobj, subset = nFeature_RNA > 2000 & Source != 'MD' &
+                      empty_well == FALSE & celltype_merge != 'DEAD' & !is.na(celltype_merge))
+
+filtered2@meta.data %>% dplyr::count(Cell_Type, Treatment)
+```
+
+
+```{r}
+
+na_grey   <- "grey85"            # any NA in celltype_merge
+
+# use the Dev Cell colors extracted, same order as the weblink
+col_ref <- c(
+  HSC   = "#ED6D52",
+  MPP1  = "#F5C3CB",
+  MPP2  = "#DF87E8",
+  LMPP  = "#5DCBCF",
+  MLP   = "#4A895B",
+  MEP   = "#8E71D5",
+  Neu1  = "#F2A93B",
+  B_NK1 = "#75FB8C",
+  Neu2  = "#C3884D",
+  MD    = "#EFE697",
+  EBM   = "#FADFB3",
+  Mk    = "#4A68DA",
+  Ery   = "#97CCE7",
+  B_NK2 = "#A6EB99"
+)
+
+col_celltype <- c(
+  DEV_HSC   = "#ED6D52", FACS_HSC = "#ED6D52", 
+  DEV_MPP1  = "#F5C3CB", #FACS_MHSC = "#DF87E8", 
+  FACS_MPP = "#F5C3CB",
+  DEV_MPP2  = "#DF87E8",
+  DEV_MEP   = "#8E71D5", FACS_MEP = "#8E71D5",
+  DEV_Ery   = "#97CCE7",
+  DEV_Mk    = "#4A68DA",
+  DEV_LMPP  = "#5DCBCF", FACS_LMPP = "#5DCBCF", FACS_CMP = "#F2A93B", 
+  DEV_MLP   = "#4A895B", FACS_CLP = "#4A895B",
+  DEV_B_NK1 = "#75FB8C",
+  DEV_B_NK2 = "#A6EB99",
+  DEV_Neu1  = "#F2A93B", FACS_GMP = "#C3884D", 
+  DEV_Neu2  = "#C3884D",
+  DEV_MD    = "#EFE697",
+  DEV_EBM   = "#FADFB3"
+)
+
+col_celltype <- col_celltype[c(
+  "FACS_HSC",'DEV_HSC',
+  "FACS_MHSC","FACS_MPP","DEV_MPP1","DEV_MPP2",
+  "FACS_CMP","FACS_LMPP",'DEV_LMPP',
+  "FACS_GMP", "DEV_Neu1","FACS_MEP",'DEV_MEP',"FACS_CLP","DEV_MLP",
+  "DEV_Neu2","DEV_B_NK1",
+  "DEV_MD","DEV_EBM","DEV_Ery","DEV_Mk")]
+
+# col_facs <- setNames(pal_npg("nrc")(10)[1:9], filtered2@meta.data$celltype_merge %>% factor %>% levels)
+# col_facs["other"] <- "grey50"        # explicit grey for “other”
+col_facs <- c(
+  HSC = "#ED6D52",
+  #MHSC = "#DF87E8", 
+  MPP = "#F5C3CB",
+  LMPP = "#5DCBCF",
+  CMP = "#F2A93B", 
+  CLP = "#4A895B",
+  MEP = "#8E71D5",
+  GMP = "#C3884D",
+  other = "grey50"
+)
+
+# col_group <- setNames(brewer.pal(12, "Paired")[c(3:6)], filtered2@meta.data$group %>% factor %>% levels)
+col_group <- c("Primary_CB34_DMSO" = "#80cdc1", 
+               "Primary_CB34_AZA" = "#018571",
+               "Primary_Patient_DMSO" = "#dfc27d",
+               'Primary_Patient_AZA' = "#a6611a"
+               )
+
+col_cluster <- setNames(brewer.pal(12, "Set3")[c(1,3:8,10,11)], 0:8)
+
+col_treatment <- setNames(brewer.pal(2, "Set2")[1:2], c('DMSO','AZA'))
+
+col_source <- setNames(c("#018571" , "#a6611a"), c('Primary_CB34', 'Primary_Patient'))
+
+col_phase <- c(G1='#663399', G2M='#E66100', S='#2A934E')
+```
+
+## Top variable features and PCA/UMAP plot
+Top 10 most variable genes still have HB genes.  
+After clustering, there are 12 major clusters.
+
+```{r, dev=c('png', 'pdf')}
+filtered2 <- FindVariableFeatures(filtered2, 
+                                  selection.method = "vst", 
+                                  nfeatures = 2000)
+
+filtered2 <- ScaleData(filtered2, features = rownames(filtered2))
+
+filtered2 <- RunPCA(filtered2, features = VariableFeatures(object = filtered2))
+VizDimLoadings(filtered2, dims = 1:2, reduction = "pca")
+
+DimPlot(filtered2, reduction = "pca") 
+
+filtered2 <- CellCycleScoring(object = filtered2, 
+                              g2m.features = cc.genes.updated.2019$g2m.genes,
+                              s.features = cc.genes.updated.2019$s.genes)
+
+filtered2 <- FindNeighbors(filtered2, dims = 1:20)
+filtered2 <- FindClusters(filtered2, resolution = 1)
+
+filtered2 <- RunUMAP(filtered2, dims = 1:20, 
+                     n.neighbors = 50)
+
+DimPlot(filtered2, reduction = "umap", label = T, cols = col_cluster) +
+  plot_layout(ncol = 1, nrow = 1,     
+              widths = unit(3, "in"),   
+              heights = unit(3, "in") )
+
+DimPlot(filtered2, reduction = "umap", 
+        split.by = 'seurat_clusters',
+        cols = col_cluster) 
+
+DimPlot(filtered2, reduction = "umap",  group.by = 'Phase',
+        cols = col_phase) + 
+  plot_layout(ncol = 1, nrow = 1,     
+              widths = unit(3, "in"),   
+              heights = unit(3, "in") )
+
+DoHeatmap(filtered2, 
+          features = c(cc.genes.updated.2019$g2m.genes, cc.genes.updated.2019$s.genes),
+          group.by = 'Phase', group.colors = col_phase,
+          angle = 90) 
+```
+
+### UMAP plot by plate 
+to examine batch effect from plate
+```{r, dev=c('png', 'pdf')}
+#| fig-cap: "UMAP plot colored by different plate"
+#| layout-ncol: 3
+
+DimPlot(filtered2, reduction = "umap", group.by = 'Plate2', 
+        cols = c(brewer.pal(8, 'Set1'), rep('grey90', 18)))  +
+  plot_layout(ncol = 1, nrow = 1,     
+              widths = unit(3, "in"),   
+              heights = unit(3, "in") )
+
+DimPlot(filtered2, reduction = "umap", group.by = 'Plate2', 
+        cols = c(rep('grey90', 8), brewer.pal(8, 'Set1'), rep('grey90', 10)))  +
+  plot_layout(ncol = 1, nrow = 1,     
+              widths = unit(3, "in"),   
+              heights = unit(3, "in") )
+
+DimPlot(filtered2, reduction = "umap", group.by = 'Plate2', 
+        cols = c(rep('grey90', 16), brewer.pal(4, 'Set1'), rep('grey90', 6)))  +
+  plot_layout(ncol = 1, nrow = 1,     
+              widths = unit(3, "in"),   
+              heights = unit(3, "in") )
+
+DimPlot(filtered2, reduction = "umap", group.by = 'Plate2', 
+        cols = c(rep('grey90', 20), brewer.pal(4, 'Set1'), rep('grey90', 2)))  +
+  plot_layout(ncol = 1, nrow = 1,     
+              widths = unit(3, "in"),   
+              heights = unit(3, "in") )
+
+```
+
+
+### UMAP plot by treatment and cell types
+```{r, dev=c('png', 'pdf')}
+#| fig-cap: "UMAP plot colored by different grouping"
+#| layout-ncol: 4
+
+DimPlot(filtered2, reduction = "umap",  group.by = 'Cell_Type',
+        cols = col_source) +
+  plot_layout(ncol = 1, nrow = 1,     
+              widths = unit(3, "in"),   
+              heights = unit(3, "in") )
+
+DimPlot(filtered2, reduction = "umap",  group.by = 'Treatment',
+        cols = col_treatment) +
+  plot_layout(ncol = 1, nrow = 1,     
+              widths = unit(3, "in"),   
+              heights = unit(3, "in") )
+
+DimPlot(filtered2, reduction = "umap",  group.by = 'group',
+        cols = col_group) +
+  plot_layout(ncol = 1, nrow = 1,     
+              widths = unit(3, "in"),   
+              heights = unit(3, "in") )
+
+DimPlot(filtered2, reduction = "umap",  group.by = 'celltype_merge',
+        cols = col_facs,   na.value = na_grey) +  
+  plot_layout(ncol = 1, nrow = 1,     
+              widths = unit(3, "in"),   
+              heights = unit(3, "in") )
+```
+
+
+```{r, dev=c('png', 'pdf'), fig.width=7, fig.width=7}
+
+for (group in names(col_group)) {
+  
+  # Create highlight column
+  filtered2$highlighted_group <- ifelse(filtered2$group == group, group, NA)
+  
+  # Define colours
+  highlight_cols <- c(col_group[group], "grey95")
+  names(highlight_cols) <- c(group, "NA")
+  
+  # Reorder cells: grey (NA) first, highlighted cells last
+  ordered_cells <- filtered2@meta.data %>%
+    mutate(cell = rownames(.)) %>%
+    arrange(!is.na(highlighted_group)) %>%   # NA first, highlighted last
+    pull(cell)
+  
+  # Plot with ordered cells
+  p <- DimPlot(
+    filtered2,
+    reduction = "umap",
+    group.by = "highlighted_group",
+    cols = highlight_cols,
+    na.value = "grey95",
+    cells = ordered_cells
+  ) +
+    ggtitle(paste("UMAP with", group, "Highlighted")) +
+    plot_layout(ncol = 1, nrow = 1,
+                widths = unit(3, "in"),
+                heights = unit(3, "in"))
+  
+  print(p)
+}
+
+
+```
+
+```{r, dev=c('png', 'pdf'), fig.width=20, fig.height=6}
+
+DimPlot(filtered2, reduction = "umap", 
+        split.by = 'group', 
+        cols = col_group, group.by = 'group') +
+  plot_layout(ncol = 1, nrow = 1,     
+                        widths = unit(12, "in"),   
+                        heights = unit(3, "in")) 
+
+DimPlot(filtered2, reduction = "umap", 
+        split.by = 'group', 
+        cols = col_cluster) +
+    plot_layout(ncol = 1, nrow = 1,     
+                        widths = unit(12, "in"),   
+                        heights = unit(3, "in")) 
+
+```
+
+```{r, dev=c('png', 'pdf')}
+#| fig-cap: "Bar plot colored by different grouping"
+#| layout-ncol: 4
+
+ggplot(filtered2@meta.data, aes(x = seurat_clusters)) +
+  geom_bar(aes(fill = Cell_Type), position = "fill") +
+  scale_fill_manual(
+    values   = col_source,
+    name     = "Source"
+  ) +
+  labs(x = "Cluster", y = "Proportion") +
+  force_panelsizes(rows = unit(4, 'inch'), cols = unit(3, 'inch')) 
+
+ggplot(filtered2@meta.data, aes(x = seurat_clusters)) +
+  geom_bar(aes(fill = Treatment), position = "fill") +
+    scale_fill_manual(
+    values   = col_treatment,
+    name     = "Treatment"
+  ) +
+  labs(x = "Cluster", y = "Proportion") +
+  force_panelsizes(rows = unit(4, 'inch'), cols = unit(3, 'inch')) 
+
+ggplot(filtered2@meta.data, aes(x = seurat_clusters)) +
+  geom_bar(aes(fill = group), position = "fill") +
+  scale_fill_manual(
+    values   = col_group,
+    name     = "Source_Treatment"
+  ) +
+  labs(x = "Cluster", y = "Proportion") +
+  force_panelsizes(rows = unit(4, 'inch'), cols = unit(3, 'inch')) 
+
+ggplot(filtered2@meta.data, aes(x = seurat_clusters)) +
+  geom_bar(aes(fill = celltype_merge), position = "fill") +
+  scale_fill_manual(
+    values   = col_facs,
+    na.value = na_grey,
+    name     = "FACS Immunophenotype"
+  ) +
+  labs(x = "Cluster", y = "Proportion") +
+  force_panelsizes(rows = unit(4, 'inch'), cols = unit(3, 'inch')) 
+
+# 0: HSC/MHSC
+# 7: lymphoid
+# 7/8: CB DMSO
+
+```
+
+### AZA-induced Seurat cluster expansion/shrinking
+```{r, dev=c('png', 'pdf'), fig.width=8, fig.height=6}
+
+ggplot(filtered2@meta.data, aes(x = group)) +
+  geom_bar(aes(fill = seurat_clusters), position = "fill") +
+    scale_fill_manual(
+    values   = col_cluster,
+    na.value = na_grey,
+    name     = "Seurat Clusters"
+  ) +
+  facet_grid(. ~ Cell_Type, scales = 'free_x') +
+  labs(x = "Group", y = "Proportion") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  force_panelsizes(rows = unit(4, 'inch'), cols = unit(3, 'inch')) 
+
+props <- filtered2@meta.data %>%
+  count(group, seurat_clusters, name = "n", .drop = FALSE) %>%
+  group_by(group) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup() %>%
+  separate(group, c(NA, 'Cell_Type', 'Treatment'), remove = F)
+
+ggplot(props, aes(x = group, y = prop, group = seurat_clusters, color = seurat_clusters)) +
+  geom_line() +
+  geom_point(size = 3) +
+  geom_text_repel(
+    aes(label = scales::percent(prop, accuracy = 0.1)),
+    size = 3, show.legend = FALSE
+  ) +
+  facet_grid(. ~ Cell_Type, scales = 'free_x') +
+  labs(x = NULL, y = "Proportion") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  force_panelsizes(rows = unit(4, 'inch'), cols = unit(3, 'inch')) +
+  scale_color_manual(
+    values   = col_cluster,
+    na.value = na_grey,
+    name     = "Seurat Clusters"
+  ) 
+
+ggplot(props %>%
+         mutate(seurat_clusters = factor(seurat_clusters, 
+                                         levels = c(0,8,1,3,5,2,6,4,7),
+                                         labels = c("HSC/MPP", "cycling/LMPP", "LMPP/Neu1", "Neu1", "Neu1/2", "MEP", "EBM", "EryP", "MLP"))), 
+       aes(x = seurat_clusters, y = prop, fill = group)) +
+  geom_col(position = position_dodge(width = 0.8, preserve = "single"), 
+           width = 0.8) +
+  labs(x = "Cell type", y = "Proportion", fill = "Group") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid(.~Cell_Type, scales = "free_x", space = "free_x") +
+  scale_fill_manual(
+    values   = col_group,
+    na.value = na_grey,
+    name     = "Group"
+  )
+
+```
+
+
+### AZA-induced FACS cluster expansion/shrinking
+```{r, dev=c('png', 'pdf'), fig.width=8, fig.height=6}
+
+ggplot(filtered2@meta.data, aes(x = group)) +
+  geom_bar(aes(fill = celltype_merge), position = "fill") +
+    scale_fill_manual(
+    values   = col_facs,
+    na.value = na_grey,
+    name     = "FACS"
+  ) +
+  facet_grid(. ~ Cell_Type, scales = 'free_x') +
+  labs(x = "Group", y = "Proportion") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  force_panelsizes(rows = unit(4, 'inch'), cols = unit(3, 'inch')) 
+
+props <- filtered2@meta.data %>%
+  count(group, celltype_merge, name = "n", .drop = FALSE) %>%
+  group_by(group) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup() %>%
+  separate(group, c(NA, 'Cell_Type', 'Treatment'), remove = F)
+
+ggplot(props, aes(x = group, y = prop, group = celltype_merge, color = celltype_merge)) +
+  geom_line() +
+  geom_point(size = 3) +
+  geom_text_repel(
+    aes(label = scales::percent(prop, accuracy = 0.1)),
+    size = 3, show.legend = FALSE
+  ) +
+  facet_grid(. ~ Cell_Type, scales = 'free_x') +
+  labs(x = NULL, y = "Proportion") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  force_panelsizes(rows = unit(4, 'inch'), cols = unit(3, 'inch')) +
+  scale_color_manual(
+    values   = col_facs,
+    na.value = na_grey,
+    name     = "FACS"
+  ) 
+
+ggplot(props %>%
+         filter(!(celltype_merge %in% c('DEAD','other'))), 
+       aes(x = celltype_merge, y = prop, fill = group)) +
+  geom_col(position = position_dodge(width = 0.8, preserve = "single"), 
+           width = 0.8) +
+  labs(x = "Cell type", y = "Proportion", fill = "Group") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid(.~Cell_Type, scales = "free_x", space = "free_x") +
+  scale_fill_manual(
+    values   = col_group,
+    na.value = na_grey,
+    name     = "Group"
+  )
+
+```
+
+
+### Find cluster marker gene
+Top 20 markers for all clusters.  
+```{r, dev=c('png', 'pdf'), fig.width=15, fig.height=5}
+
+cluster.markers <- FindAllMarkers(filtered2, only.pos = TRUE)
+
+# Create an interactive datatable, show only top 20 (by p value) positive markers in each cluster
+datatable(cluster.markers[, c(6,3,4,2,1,5,7)] %>%
+            group_by(cluster) %>% 
+            arrange(p_val) %>% 
+            slice_head(n = 20) %>% 
+            ungroup(), 
+          filter = "top", caption = 'Top 20 DEG in each cluster',
+          options = list(pageLength = 20, autoWidth = TRUE)) %>%
+  formatSignif(columns = 2:6, digits = 3)
+
+
+# selected marker based on pct, logFC and p value
+selected_marker <- cluster.markers %>%
+  group_by(cluster) %>% 
+  arrange(p_val) %>% 
+  slice_head(n = 3) %>% 
+  ungroup() %>% pull(gene)
+
+DotPlot(filtered2, features = selected_marker %>% unique())  + 
+  RotatedAxis() +
+  force_panelsizes(rows = unit(3, 'inch'), cols = unit(length(selected_marker)/4, 'inch')) +
+  scale_color_viridis(direction = 1) +
+  ggtitle('Top 3 markers in each cluster')
+
+
+selected_marker <- cluster.markers %>%
+  group_by(cluster) %>% 
+  arrange(p_val) %>% 
+  filter(pct.1 > 0.5, pct.2 < 0.2, avg_log2FC > 1) %>%
+  slice_head(n = 3) %>% 
+  ungroup() %>% pull(gene)
+
+DotPlot(filtered2, features = selected_marker %>% unique())  + 
+  RotatedAxis() +
+  force_panelsizes(rows = unit(3, 'inch'), cols = unit(length(selected_marker)/4, 'inch')) +
+  scale_color_viridis(direction = 1) +
+  ggtitle('Top 3 markers in each cluster\n(pct.cluster > 0.5, pct.rest < 0.2, avg_log2FC > 1)')
+
+# show the markers from Dev cell paper
+marker <- read.table('data/dev_cell_2022/Cluster_marker.txt', sep = '\t', header = T)
+
+marker <- marker %>% filter(avg_logFC>0 ) %>%
+  group_by(cluster) %>%
+  arrange(p_val_adj) %>%
+  slice_head(n=3) %>% 
+  pull(gene) %>%
+  unique()
+
+DotPlot(filtered2, features = marker)  + 
+  RotatedAxis() +
+  force_panelsizes(rows = unit(3, 'inch'), cols = unit(length(marker)/4, 'inch')) +
+  scale_color_viridis(direction = 1) +
+  ggtitle('Top 3 markers in DevCell subtype from their paper')
+
+# cluster 7: MLP
+DotPlot(filtered2, c('CLNK','CCR7','KCNK17')) +
+  RotatedAxis() +
+  scale_color_viridis(direction = 1) +
+  ggtitle('Top 3 markers DevCell MLP')
+# cluster 0: HSC/PP
+DotPlot(filtered2, c('AVP','CRHBP','DLK1','RPL31','ENO1','RPS3','RPL33','RPS14')) +
+  RotatedAxis() +
+  scale_color_viridis(direction = 1) +
+  ggtitle('Top 3 markers DevCell HSC/MPP1/MPP2')
+# cluster 1: LMPP/Neu1
+DotPlot(filtered2, c('ENO1','GAPDH','SMIM24','MPO','CDK6','FAM101B')) +
+  RotatedAxis() +
+  scale_color_viridis(direction = 1) +
+  ggtitle('Top 3 markers DevCell LMPP/Neu1')
+# cluster 8: cycling LMPP
+DotPlot(filtered2, c('ENO1','GAPDH','SMIM24')) +
+  RotatedAxis() +
+  scale_color_viridis(direction = 1) +
+  ggtitle('Top 3 markers DevCell LMPP') # and Histone
+# cluster 2: MEP
+DotPlot(filtered2, c('CTNNBL1','CNRIP1','SLC40A1')) +
+  RotatedAxis() +
+  scale_color_viridis(direction = 1) +
+  ggtitle('Top 3 markers DevCell MEP')
+# cluster 4: EryP
+DotPlot(filtered2, c('APOC1','FAM178B','CNRIP1')) +
+  RotatedAxis() +
+  scale_color_viridis(direction = 1) +
+  ggtitle('Top 3 markers DevCell Ery')
+# cluster 6: EBM
+DotPlot(filtered2, c('IL5RA','PRG2','BACE2')) +
+  RotatedAxis() +
+  scale_color_viridis(direction = 1) +
+  ggtitle('Top 3 markers DevCell EBM')
+# cluster 5: Neu1/2
+DotPlot(filtered2, c('MPO','CDK6','FAM101B', 'CSTA','SERPINB10','ANKRD18A')) +
+  RotatedAxis() +
+  scale_color_viridis(direction = 1) +
+  ggtitle('Top 3 markers DevCell Neu1/Neu2')
+# cluster 3: Neu1
+DotPlot(filtered2, c('MPO','CDK6','FAM101B')) +
+  RotatedAxis() +
+  scale_color_viridis(direction = 1) +
+  ggtitle('Top 3 markers DevCell Neu1')
+
+DotPlot(filtered2, features = c('CRHBP','DLK1','RPL31','ENO1','RPS3','RPS14', # HSC/MPP
+                                'CTNNBL1','CNRIP1','SLC40A1', # MEP
+                                'MPO','CDK6', # Neu1
+                                'APOC1','FAM178B',  # Ery
+                                'CSTA','SERPINB10','ANKRD18A', # Neu2
+                                'IL5RA','PRG2','BACE2', # EBM
+                                'CLNK','CCR7','KCNK17', # LMPP/Neu1
+                                'GAPDH','SMIM24' # cycling LMPP
+                                )) +   
+  RotatedAxis() +
+  force_panelsizes(rows = unit(3, 'inch'), cols = unit(24/4, 'inch')) +
+  scale_color_viridis(direction = 1) +
+  ggtitle('Top 3 DevCell markers in each cluster')
+
+```
+
+
+## Cell type annotation 
+
+### use Dev Cell 2022 data 
+```{r, dev=c('png', 'pdf')}
+## run azimuth
+
+filtered2 <- RunAzimuth(
+  query = filtered2,
+  reference = "../PD7151/R/ref_azimuth/" 
+)
+
+filtered2$predicted.RNA_clusters <- factor(filtered2$predicted.RNA_clusters, 
+                                            levels = names(col_ref))
+
+DimPlot(filtered2, reduction = "umap",  group.by = 'predicted.RNA_clusters',
+        cols = col_ref) +
+  ggtitle("Annotated to Dev Cell using Azimuth") +
+  plot_layout(ncol = 1, nrow = 1,     
+              widths = unit(3, "in"),   
+              heights = unit(3, "in") )
+
+ggplot(filtered2@meta.data, aes(x = seurat_clusters)) +
+  geom_bar(aes(fill = predicted.RNA_clusters), position = "fill") +
+  scale_fill_manual(
+    values   = col_ref,
+    na.value = na_grey,
+    name     = "Azimuth Dev Cell"
+  ) +
+  labs(x = "Cluster", y = "Proportion") +
+  force_panelsizes(rows = unit(4, 'inch'), cols = unit(3, 'inch')) 
+
+## compare dev cell vs facs clusters
+filtered2@meta.data %>%
+  filter(Cell_Type != 'MDSL') %>%
+  group_by(Cell_Type, Treatment) %>%
+  group_modify(~make_long(.x, celltype_merge, predicted.RNA_clusters)) %>%
+  mutate(node = factor(node, 
+                       levels = c(
+                         rev(names(col_ref)),
+                         rev(names(col_facs))) %>% rev() %>% unique() %>% rev() ) 
+  ) %>% 
+  ggplot(aes(x = x, 
+             next_x = next_x, 
+             node = node, 
+             next_node = next_node,
+             fill = node,
+             label = node)) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30") +
+  geom_sankey_label(size = 3, color = "white", fill = "gray40") +
+  # scale_fill_viridis_d(drop = FALSE) +
+  scale_fill_manual(values = c(col_facs, 
+                               col_ref
+  ))  
+
+saveRDS(filtered2, 'output/filtered2.rds')
+filtered2@meta.data %>% write.csv('output/master_filtered.csv')
+```
+
+
+```{r}
+sessionInfo()
+```

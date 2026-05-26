@@ -1,0 +1,431 @@
+---
+title: "SCIMETAR single cell analysis (Flitered by RPKM) add LINE1, FACS and amplicon data"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+    number-sections: true
+    number-depth: 3
+execute: 
+  cache: true
+  warning: false
+  error: false
+---
+
+## Load filtered and annotated seurat object 
+
+```{r, dev=c('png', 'pdf')}
+library(matrixStats)
+library(ggfortify)
+library(Seurat)
+library(edgeR)
+library(tidyverse)
+library(DT)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggpubr)
+library(EnhancedVolcano)
+library(ggh4x)
+library(viridis)
+library(patchwork)
+library(readxl)
+library(RColorBrewer)
+library(UpSetR)
+library(data.table)
+library(ggsankey)
+library(ggalluvial)
+library(ggrepel)
+library(scales)
+library(ggsci)
+```
+
+
+```{r}
+
+filtered2 <- readRDS("output/filtered2.rds")
+
+# 2 group genotype
+filtered2 <- AddMetaData(filtered2, 
+                         metadata = data.frame(genotype_srsf2_2 = str_replace(filtered2$genotype_srsf2, 'mut/mut','mut/wt'),
+                                               genotype_tet2a_2 = str_replace(filtered2$genotype_tet2a, 'mut/mut','mut/wt'),
+                                               genotype_tet2b_2 = str_replace(filtered2$genotype_tet2b, 'mut/mut','mut/wt')))
+
+# 1615 cells
+filtered2_pass <- subset(filtered2, subset = keep_median & dCt > 0)
+
+# harmozine gene name
+gencode_gtf <- readRDS('/home/users/allstaff/yan.a/lab_davidson/yan.a/ref/gencode/gencodev44.rds')
+
+genes <- gencode_gtf %>% plyranges::filter(type=='gene') %>%
+  plyranges::select(gene_id, gene_name) %>% data.frame()
+
+m <- genes$gene_id %>%
+  str_remove("\\..*") %>%
+  unique() %>%
+  bitr(fromType = "ENSEMBL",
+       toType   = c("ENTREZID","SYMBOL"),
+       OrgDb    = org.Hs.eg.db)
+
+m1 <- m %>%
+  left_join(genes %>% transmute(ENSEMBL = str_remove(gene_id, "\\..*"),
+                                gene_name),
+            by = "ENSEMBL") %>%
+  mutate(match_name = (!is.na(gene_name) & SYMBOL == gene_name)) %>%
+  arrange(ENSEMBL, desc(match_name), is.na(ENTREZID)) %>%  # prefer name match, then non-NA
+  distinct(ENSEMBL, .keep_all = TRUE) %>%
+  dplyr::select(-gene_name, -match_name)
+
+genes <- genes %>% 
+  mutate(ENSEMBL = str_remove(gene_id, "\\..*")) %>% 
+  left_join(m1, by = 'ENSEMBL')
+
+```
+
+## DEG analysis (separate by source and treatment)
+
+### DEG analysis in each group comparing the top 1/3 vs bottom 1/3 based on LINE1
+* Only remove failed RNAseq cells.  
+* Cell.1 is top and Cell.2 is bottom.  
+* Positive logFC means higher expression in top.
+* Use dCt_adj
+
+```{r,fig.width=20, fig.height=15,  dev=c('png', 'pdf')}
+
+deglist2 <- lapply(c("Primary_Patient_DMSO", "Primary_Patient_AZA", 
+                            "Primary_CB34_DMSO",   "Primary_CB34_AZA"   ), function(x){
+  sub <- subset(filtered2_pass, subset = group == x)
+  
+  median <- median(sub$dCt_adj)
+  tercicle <- quantile(sub$dCt_adj, probs = seq(0, 1, length.out = 4))
+  
+  sub <- AddMetaData(sub, 
+                     metadata = data.frame(Median = ifelse(sub$dCt_adj >= median, 'top','bottom'),
+                                           Terciles = ifelse(sub$dCt_adj >= tercicle[3], 'top', 
+                                                             ifelse(sub$dCt_adj < tercicle[2], 'bottom', 'other'))))
+  deg <- tryCatch(
+    {
+    FindMarkers(
+  object        = sub,
+  ident.1       = "top",               # which treatment to test
+  ident.2       = "bottom",              # what to compare against, baseline
+  group.by      = "Terciles",         # which metadata column defines AZA vs DMSO
+  # subset.ident  = "Primary_Patient",   # first subset to only these cells
+  only.pos      = FALSE
+) %>% rownames_to_column(var = 'gene_name') %>%
+  left_join(genes, by = 'gene_name')
+  },
+  error = function(e) data.frame()
+)
+})
+ 
+names(deglist2) <- c("Primary_Patient_DMSO", "Primary_Patient_AZA", 
+                            "Primary_CB34_DMSO",   "Primary_CB34_AZA"   )
+
+gene.list.grp2 <- lapply(deglist2, function(x) {
+                        if (nrow(x) != 0) {
+                            x %>% filter(p_val < 0.05) %>% pull(ENTREZID)
+                        }
+})
+
+fromList(gene.list.grp2) %>%
+  UpSetR::upset(nsets = length(gene.list.grp2))
+
+go.grp2 <- gene.list.grp2 %>%
+  compareCluster(fun = 'enrichGO', OrgDb = org.Hs.eg.db, ont = 'BP', readable = T) %>%
+  clusterProfiler::simplify()
+
+dotplot(go.grp2, label_format = 50) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+# cnetplot(go.grp2, foldChange = setNames(deg.pp$avg_log2FC, deg.pp$ENTREZID))
+
+lapply(names(deglist2), function(x) {
+  if (nrow(deglist2[[x]]) != 0) {
+      deglist2[[x]] %>% mutate(comparison = x) %>%
+    filter(p_val < 0.05)
+  }
+}) %>% rbindlist() %>%
+  write.csv(., file = 'output/line1_deg_group2.csv', quote = F, row.names = F)
+
+write.csv(go.grp2@compareClusterResult, 
+           file = 'output/line1_deg_group_go2.csv', quote = F, row.names = F)
+
+# split up and down
+gene.list.split2 <- c(lapply(deglist2, function(x) {
+  x %>% filter(p_val < 0.05, avg_log2FC > 0) %>%
+    pull(ENTREZID)
+}),  lapply(deglist2, function(x) {
+  x %>% filter(p_val < 0.05, avg_log2FC < 0) %>%
+    pull(ENTREZID)
+}))
+names(gene.list.split2) <- paste0(names(gene.list.split2), rep(c('_up', '_down'), each = 4))
+
+fromList(gene.list.split2) %>%
+  UpSetR::upset(sets = names(gene.list.split2))
+
+go.split2 <- gene.list.split2 %>%
+  compareCluster(fun = 'enrichGO', OrgDb = org.Hs.eg.db, ont = 'BP', readable = T) %>%
+  clusterProfiler::simplify()
+
+dotplot(go.split2)
+cnetplot(go.split2
+         # , foldChange = setNames(deg.pp$avg_log2FC, deg.pp$ENTREZID)
+         )
+
+write.csv(go.split2@compareClusterResult, 
+           file = 'output/line1_deg_group_go_splitdirection2.csv', quote = F, row.names = F)
+```
+
+## DEG analysis (only separate by source)
+
+### DEG analysis in each cluster comparing the top 1/3 vs bottom 1/3 based on LINE1
+* Only remove failed RNAseq cells.  
+* Cell.1 is top and Cell.2 is bottom.  
+* Positive logFC means higher expression in top.
+* Use dCt_adj
+
+```{r,fig.width=20, fig.height=15,  dev=c('png', 'pdf')}
+
+deglist.pt2 <- lapply(0:8, function(x){
+  sub <- subset(filtered2_pass, subset = seurat_clusters == x & Cell_Type == 'Primary_Patient')
+  
+  median <- median(sub$dCt_adj)
+  tercicle <- quantile(sub$dCt_adj, probs = seq(0, 1, length.out = 4))
+  
+  sub <- AddMetaData(sub, 
+                     metadata = data.frame(Median = ifelse(sub$dCt_adj >= median, 'top','bottom'),
+                                           Terciles = ifelse(sub$dCt_adj >= tercicle[3], 'top', 
+                                                             ifelse(sub$dCt_adj < tercicle[2], 'bottom', 'other'))))
+  deg <- tryCatch(
+    {
+    FindMarkers(
+  object        = sub,
+  ident.1       = "top",               # which treatment to test
+  ident.2       = "bottom",              # what to compare against, baseline
+  group.by      = "Terciles",         # which metadata column defines AZA vs DMSO
+  # subset.ident  = "Primary_Patient",   # first subset to only these cells
+  only.pos      = FALSE
+) %>% rownames_to_column(var = 'gene_name') %>%
+  left_join(genes, by = 'gene_name')
+  },
+  error = function(e) data.frame()
+)
+
+})
+
+deglist.cb2 <- lapply(0:8, function(x){
+  sub <- subset(filtered2_pass, subset = seurat_clusters == x & Cell_Type == 'Primary_CB34')
+  
+  median <- median(sub$dCt_adj)
+  tercicle <- quantile(sub$dCt_adj, probs = seq(0, 1, length.out = 4))
+  
+  sub <- AddMetaData(sub, 
+                     metadata = data.frame(Median = ifelse(sub$dCt_adj >= median, 'top','bottom'),
+                                           Terciles = ifelse(sub$dCt_adj >= tercicle[3], 'top', 
+                                                             ifelse(sub$dCt_adj < tercicle[2], 'bottom', 'other'))))
+  deg <- tryCatch(
+    {
+    FindMarkers(
+  object        = sub,
+  ident.1       = "top",               # which treatment to test
+  ident.2       = "bottom",              # what to compare against, baseline
+  group.by      = "Terciles",         # which metadata column defines AZA vs DMSO
+  # subset.ident  = "Primary_CB34",   # first subset to only these cells
+  only.pos      = FALSE
+) %>% rownames_to_column(var = 'gene_name') %>%
+  left_join(genes, by = 'gene_name')
+  },
+  error = function(e) data.frame()
+)
+
+})
+ 
+names(deglist.pt2) <- paste0('Patient_Cluster', 0:8)
+names(deglist.cb2) <- paste0('CB_Cluster', 0:8)
+
+gene.list.src2 <- lapply(c(deglist.pt2, deglist.cb2), function(x) {
+  if (nrow(x) != 0) {
+      x %>% filter(p_val < 0.05) %>% pull(ENTREZID)
+  }
+})
+
+fromList(gene.list.src2) %>%
+  UpSetR::upset(nsets = 18)
+
+go.src2 <- gene.list.src2 %>%
+  compareCluster(fun = 'enrichGO', OrgDb = org.Hs.eg.db, ont = 'BP', readable = T) %>%
+  clusterProfiler::simplify()
+
+dotplot(go.src2, label_format = 50) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+# cnetplot(go.src2, foldChange = setNames(deg.pp$avg_log2FC, deg.pp$ENTREZID))
+
+
+list.all.src2 <- c(deglist.pt2, deglist.cb2) 
+lapply(names(list.all.src2), function(x) {
+  if (nrow(list.all.src2[[x]]) != 0) {
+      list.all.src2[[x]] %>% mutate(comparison = x) %>%
+    filter(p_val < 0.05)
+  }
+}) %>% rbindlist() %>%
+  write.csv(., file = 'output/line1_deg_source2.csv', quote = F, row.names = F)
+
+write.csv(go.src2@compareClusterResult, 
+           file = 'output/line1_deg_source_go2.csv', quote = F, row.names = F)
+```
+
+## DEG analysis (separate by source and treatment)
+
+### DEG analysis in each cluster comparing the top 1/3 vs bottom 1/3 based on LINE1
+* Only remove failed RNAseq cells.  
+* Cell.1 is top and Cell.2 is bottom.  
+* Positive logFC means higher expression in top.
+* Use dCt_adj
+
+```{r,fig.width=20, fig.height=15,  dev=c('png', 'pdf')}
+
+Idents(filtered2_pass) <- filtered2_pass$Cell_Type
+
+deglist.pt.dmso2 <- lapply(0:8, function(x){
+  sub <- subset(filtered2_pass, subset = seurat_clusters == x & group == 'Primary_Patient_DMSO')
+  
+  median <- median(sub$dCt_adj)
+  tercicle <- quantile(sub$dCt_adj, probs = seq(0, 1, length.out = 4))
+  
+  sub <- AddMetaData(sub, 
+                     metadata = data.frame(Median = ifelse(sub$dCt_adj >= median, 'top','bottom'),
+                                           Terciles = ifelse(sub$dCt_adj >= tercicle[3], 'top', 
+                                                             ifelse(sub$dCt_adj < tercicle[2], 'bottom', 'other'))))
+  deg <- tryCatch(
+    {
+    FindMarkers(
+  object        = sub,
+  ident.1       = "top",               # which treatment to test
+  ident.2       = "bottom",              # what to compare against, baseline
+  group.by      = "Terciles",         # which metadata column defines AZA vs DMSO
+  # subset.ident  = "Primary_Patient",   # first subset to only these cells
+  only.pos      = FALSE
+) %>% rownames_to_column(var = 'gene_name') %>%
+  left_join(genes, by = 'gene_name')
+  },
+  error = function(e) data.frame()
+)
+})
+
+deglist.pt.aza2 <- lapply(0:8, function(x){
+  sub <- subset(filtered2_pass, subset = seurat_clusters == x & group == 'Primary_Patient_AZA')
+  
+  median <- median(sub$dCt_adj)
+  tercicle <- quantile(sub$dCt_adj, probs = seq(0, 1, length.out = 4))
+  
+  sub <- AddMetaData(sub, 
+                     metadata = data.frame(Median = ifelse(sub$dCt_adj >= median, 'top','bottom'),
+                                           Terciles = ifelse(sub$dCt_adj >= tercicle[3], 'top', 
+                                                             ifelse(sub$dCt_adj < tercicle[2], 'bottom', 'other'))))
+  deg <- tryCatch(
+    {
+    FindMarkers(
+  object        = sub,
+  ident.1       = "top",               # which treatment to test
+  ident.2       = "bottom",              # what to compare against, baseline
+  group.by      = "Terciles",         # which metadata column defines AZA vs DMSO
+  # subset.ident  = "Primary_Patient",   # first subset to only these cells
+  only.pos      = FALSE
+) %>% rownames_to_column(var = 'gene_name') %>%
+  left_join(genes, by = 'gene_name')
+  },
+  error = function(e) data.frame()
+)
+})
+
+deglist.cb.dmso2 <- lapply(0:8, function(x){
+  sub <- subset(filtered2_pass, subset = seurat_clusters == x & group == 'Primary_CB34_DMSO')
+  
+  median <- median(sub$dCt_adj)
+  tercicle <- quantile(sub$dCt_adj, probs = seq(0, 1, length.out = 4))
+  
+  sub <- AddMetaData(sub, 
+                     metadata = data.frame(Median = ifelse(sub$dCt_adj >= median, 'top','bottom'),
+                                           Terciles = ifelse(sub$dCt_adj >= tercicle[3], 'top', 
+                                                             ifelse(sub$dCt_adj < tercicle[2], 'bottom', 'other'))))
+  deg <- tryCatch(
+    {
+    FindMarkers(
+  object        = sub,
+  ident.1       = "top",               # which treatment to test
+  ident.2       = "bottom",              # what to compare against, baseline
+  group.by      = "Terciles",         # which metadata column defines AZA vs DMSO
+  # subset.ident  = "Primary_Patient",   # first subset to only these cells
+  only.pos      = FALSE
+) %>% rownames_to_column(var = 'gene_name') %>%
+  left_join(genes, by = 'gene_name')
+  },
+  error = function(e) data.frame()
+)
+})
+
+deglist.cb.aza2 <- lapply(0:8, function(x){
+  sub <- subset(filtered2_pass, subset = seurat_clusters == x & group == 'Primary_CB34_AZA')
+  
+  median <- median(sub$dCt_adj)
+  tercicle <- quantile(sub$dCt_adj, probs = seq(0, 1, length.out = 4))
+  
+  sub <- AddMetaData(sub, 
+                     metadata = data.frame(Median = ifelse(sub$dCt_adj >= median, 'top','bottom'),
+                                           Terciles = ifelse(sub$dCt_adj >= tercicle[3], 'top', 
+                                                             ifelse(sub$dCt_adj < tercicle[2], 'bottom', 'other'))))
+  deg <- tryCatch(
+    {
+    FindMarkers(
+  object        = sub,
+  ident.1       = "top",               # which treatment to test
+  ident.2       = "bottom",              # what to compare against, baseline
+  group.by      = "Terciles",         # which metadata column defines AZA vs DMSO
+  # subset.ident  = "Primary_Patient",   # first subset to only these cells
+  only.pos      = FALSE
+) %>% rownames_to_column(var = 'gene_name') %>%
+  left_join(genes, by = 'gene_name')
+  },
+  error = function(e) data.frame()
+)
+})
+ 
+names(deglist.pt.aza2) <- paste0('Patient_AZA_Cluster', 0:8)
+names(deglist.pt.dmso2) <- paste0('Patient_DMSO_Cluster', 0:8)
+
+names(deglist.cb.aza2) <- paste0('CB_AZA_Cluster', 0:8)
+names(deglist.cb.dmso2) <- paste0('CB_DMSO_Cluster', 0:8)
+
+gene.list.st2 <- lapply(c(deglist.pt.aza2, deglist.pt.dmso2, 
+                      deglist.cb.aza2, deglist.cb.dmso2), function(x) {
+                        if (nrow(x) != 0) {
+                            x %>% filter(p_val < 0.05) %>% pull(ENTREZID)
+                        }
+})
+
+fromList(gene.list.st2) %>%
+  UpSetR::upset(nsets = length(gene.list.st2))
+
+go.st2 <- gene.list.st2 %>%
+  compareCluster(fun = 'enrichGO', OrgDb = org.Hs.eg.db, ont = 'BP', readable = T) %>%
+  clusterProfiler::simplify()
+
+dotplot(go.st2, label_format = 50) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+# cnetplot(go.st2, foldChange = setNames(deg.pp$avg_log2FC, deg.pp$ENTREZID))
+
+list.all.st2 <- c(deglist.pt.aza2, deglist.pt.dmso2, deglist.cb.aza2, deglist.cb.dmso2) 
+lapply(names(list.all.st2), function(x) {
+  if (nrow(list.all.st2[[x]]) != 0) {
+      list.all.st2[[x]] %>% mutate(comparison = x) %>%
+    filter(p_val < 0.05)
+  }
+}) %>% rbindlist() %>%
+  write.csv(., file = 'output/line1_deg_source_treatment2.csv', quote = F, row.names = F)
+
+write.csv(go.st2@compareClusterResult, 
+           file = 'output/line1_deg_source_treatment_go2.csv', quote = F, row.names = F)
+```

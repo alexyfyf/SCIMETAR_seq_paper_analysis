@@ -1,0 +1,224 @@
+---
+title: "SCIMETAR QC using zUMI counts - PD7151"
+format:
+  html:
+    embed-resources: true
+    toc: true
+    code-fold: true
+    code-overflow: wrap
+execute: 
+  cache: true
+  warning: false
+  error: false
+---
+  
+## load package and data
+  
+Use the same code as Forrest (with minor modification such as row and col names modification).  
+Use zUMI parameter generated count matrix and gencode v44 annotation.  
+
+```{r, dev=c('png', 'pdf')}
+library(tidyverse)
+library(edgeR)
+library(data.table)
+library(magrittr)
+library(Seurat)
+library(plyranges)
+
+counts.path <- "../results/gene_counts/collective_gene_counts.txt"
+novaseq.counts <- fread(counts.path)[,-c(2:6)] %>% 
+  tibble::column_to_rownames('Geneid') %>% 
+  as.matrix()
+
+# replace rowname to gene name
+# gencode_gtf <- plyranges::read_gff('https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_44/gencode.v44.annotation.gtf.gz')
+gencode_gtf <- readRDS('/home/users/allstaff/yan.a/lab_davidson/yan.a/ref/gencode/gencodev44.rds')
+
+genes <- gencode_gtf %>% plyranges::filter(type=='gene') %>%
+  plyranges::select(gene_id, gene_name) %>% data.frame()
+
+stopifnot(all.equal(rownames(novaseq.counts), genes$gene_id))
+
+rownames(novaseq.counts) <- genes$gene_name %>% make.unique()
+
+# replace _ with - for seurat later
+rownames(novaseq.counts) <- str_replace_all(rownames(novaseq.counts), '_', '-')
+colnames(novaseq.counts) <- stringr::str_extract(colnames(novaseq.counts), "^[^-]+")
+
+## compute FPKM
+fc_genelength <- fread(counts.path)$Length
+names(fc_genelength) <- fread(counts.path)$Geneid
+
+# saveRDS(fc_genelength, 'fc_genelength.rds')
+
+rpkm <- rpkm(novaseq.counts, 
+             gene.length = fc_genelength)
+rpkm <- rpkm[!(matrixStats::rowSums2(rpkm) == 0), ]
+
+sample.df <- readxl::read_xlsx('data/PD7151 cycle 4 SCIMETAR Plates cross-indexed 20260115.xlsx') %>%
+  dplyr::rename(Plate = "Plate...3", Well_ID = "Well_ID...4") %>%
+  mutate(Plate = paste0('P', str_pad(Plate, width = 2, pad = "0")))
+
+sample.df <- data.frame(Cell_ID = colnames(novaseq.counts)) %>%
+  separate(Cell_ID, c('Plate', 'Source', NA, 'Well_ID'), remove = F) %>% # the middle of the rnaseq id is wrong
+  left_join(sample.df, by = c('Plate', 'Well_ID')) %>%
+  unite('Plate_Well', Plate, Well_ID, remove = F) %>% 
+  mutate(empty_well = Is_Empty,
+         Treatment = Cell_Type) # add a dummy treatment which is same as celltype
+
+rownames(sample.df) <- sample.df$Cell_ID
+
+```
+
+## create Seurat object 
+Seurat object is more flexible and easy integrate with edgeR later using Seurat2PB function.  
+
+```{r, dev=c('png', 'pdf')}
+ss3 <- CreateSeuratObject(counts = rpkm, 
+                          assay = 'RNA', 
+                          meta.data = sample.df)
+
+# use RPKM to calculate MT/RB/HB percentage
+ss3[["percent.mt"]] <- PercentageFeatureSet(ss3, pattern = "^MT-")
+ss3[["percent.rb"]] <- PercentageFeatureSet(ss3, pattern = "^RP[SL]")
+ss3[["percent.hb"]] <- PercentageFeatureSet(ss3, pattern = "^HB[AB]")
+
+```
+
+## QC (empty well vs non empty)
+We would like to see how the empty well behaves in those features.   
+So we can use similar cut-off to remove the non-empty wells if they look like empty wells in those features.
+
+```{r, dev=c('png', 'pdf')}
+# nCounts_RNA become meaningless here
+VlnPlot(ss3, features = c("nFeature_RNA", "percent.mt", "percent.rb", "percent.hb"), 
+        split.by = 'empty_well', group.by = 'Source',
+        ncol = 2)
+
+VlnPlot(ss3, features = c("nFeature_RNA", "percent.mt", "percent.rb", "percent.hb"), 
+        split.by = 'empty_well', group.by = 'Treatment',
+        ncol = 2)
+
+FeatureScatter(ss3, feature1 = "nFeature_RNA", feature2 = "percent.mt", 
+               split.by = 'empty_well', group.by = 'Source')
+FeatureScatter(ss3, feature1 = "nFeature_RNA", feature2 = "percent.rb", 
+               split.by = 'empty_well', group.by = 'Source')
+FeatureScatter(ss3, feature1 = "nFeature_RNA", feature2 = "percent.hb", 
+               split.by = 'empty_well', group.by = 'Source')
+```
+
+
+```{r, dev=c('png', 'pdf')}
+
+# log1p normalization and calculate cell cycle score, this replace the NormalizeData step
+ss3[['RNA']]$data <- log1p(ss3[['RNA']]$counts)
+
+# FindVariableFeatures use counts slots
+ss3 <- FindVariableFeatures(ss3, 
+                            selection.method = "vst", 
+                            nfeatures = 2000)
+ss3 <- ScaleData(ss3, features = rownames(ss3))
+
+ss3 <- CellCycleScoring(object = ss3, 
+                        g2m.features = cc.genes.updated.2019$g2m.genes,
+                        s.features = cc.genes.updated.2019$s.genes)
+
+VlnPlot(ss3, features = c('PCNA','MKI67','TOP2A','MCM6'),
+        split.by = 'empty_well', cols = 2, group.by = 'Source')
+
+```
+
+
+## Identify the 10 most highly variable genes
+```{r, dev=c('png', 'pdf')}
+top10 <- head(VariableFeatures(ss3), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(ss3)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot2
+
+```
+
+## PCA plot and loading in PC1 and PC2
+```{r, dev=c('png', 'pdf')}
+
+ss3 <- RunPCA(ss3, features = VariableFeatures(object = ss3))
+
+ElbowPlot(ss3)
+
+VizDimLoadings(ss3, dims = 1:2, reduction = "pca")
+
+DimPlot(ss3, reduction = "pca") 
+
+```
+
+## UMAP
+```{r, dev=c('png', 'pdf')}
+ss3 <- FindNeighbors(ss3, dims = 1:10)
+ss3 <- FindClusters(ss3, resolution = 0.5)
+
+ss3 <- RunUMAP(ss3, dims = 1:10, n.neighbors = 30)
+DimPlot(ss3, reduction = "umap")
+
+DimPlot(ss3, reduction = "umap", group.by = 'empty_well')
+
+DimPlot(ss3, reduction = "umap", group.by = 'Phase')
+DimPlot(ss3, reduction = "umap", group.by = 'Source')
+DimPlot(ss3, reduction = "umap", group.by = 'Treatment')
+
+DimPlot(ss3, reduction = "umap", group.by = 'Plate', split.by = 'Treatment')
+```
+
+
+```{r, fig.height=15, dev=c('png', 'pdf')}
+FeaturePlot(ss3, split.by = 'empty_well',
+            features = c("CD34", "TET2", "GAPDH", "CD33")) & theme(legend.position = "right")
+
+FeaturePlot(ss3, split.by = 'empty_well',
+            features = c("PTPRC","HBB", 'HBA1','HBA2')) & theme(legend.position = "right")
+
+# nCount is meaningless for RPKM
+FeaturePlot(ss3, split.by = 'empty_well',
+            features = c("nFeature_RNA", "percent.mt", "percent.rb", "percent.hb")) & theme(legend.position = "right")
+
+```
+
+
+```{r, dev=c('png', 'pdf')}
+# Calculate cell counts per cluster
+cluster_counts <- data.frame(cluster = ss3$seurat_clusters, 
+                             Source = ss3$Source,
+                             Treatment = ss3$Treatment,
+                             empty = ss3$empty_well, 
+                             Plate = ss3$Plate)
+
+# Plot using a barplot
+DimPlot(ss3, split.by = 'empty_well',
+        reduction = "umap", 
+        group.by = 'Source') & theme(legend.position = "right")
+
+ggplot(cluster_counts, aes(x = cluster)) +
+  geom_bar(aes(fill = Source), position = "fill") +
+  labs(x = "Cluster", y = "Proportion") 
+
+DimPlot(ss3, split.by = 'empty_well',
+        reduction = "umap", 
+        group.by = 'Treatment') & theme(legend.position = "right")
+
+ggplot(cluster_counts, aes(x = cluster)) +
+  geom_bar(aes(fill = Treatment), position = "fill") +
+  labs(x = "Cluster", y = "Proportion") 
+
+ggplot(cluster_counts, aes(x = cluster)) +
+  geom_bar(aes(fill = Plate), position = "fill") +
+  labs(x = "Cluster", y = "Proportion") 
+
+```
+
+
+```{r, dev=c('png', 'pdf')}
+
+saveRDS(ss3, 'output/seurat_zumi_rpkm_unfilt2.rds')
+
+```
